@@ -42,7 +42,7 @@
 | 언어/빌드 | Rust stable, edition 2021, Cargo 단일 크레이트(`src/lib.rs` + `src/main.rs`) | 실행 파일 하나로 배포 |
 | Windows 타깃 | `x86_64-pc-windows-msvc`, 정적 CRT(`.cargo/config.toml`에 `-C target-feature=+crt-static`) | 별도 런타임 설치 없이 `dipper.exe` 단독 실행 |
 | CLI | `clap` (derive) | 표준적 |
-| 설정 | `serde` + `toml`, 파일명 `dipper.toml` | Rust 생태계에서 가장 안정적인 설정 형식 (결정 필요 3번) |
+| 설정 | `serde` + `toml`, 파일명 `dipper.toml` | Rust 생태계에서 가장 안정적인 설정 형식 (결정됨, 5절) |
 | 오류 | `thiserror`(라이브러리), `anyhow`(바이너리) | |
 | 표 출력 | `comfy-table` | |
 | 진행률 | `indicatif` | 터미널 진행 막대, 비대화형 환경에서는 주기적 로그 줄 |
@@ -200,7 +200,7 @@ count_first = true
 각 PR은 `main`에서 새 브랜치로 만들고, CI가 Linux·Windows 모두에서 초록이어야 하며, 머지는 민호님 승인 후에만 합니다. 모든 PR 공통 기준: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`가 `ubuntu-latest`와 `windows-latest`에서 통과.
 
 ### PR1. 프로젝트 뼈대
-- 3절 구조 중 PR1 표시 파일: `.cargo/config.toml`, `.github/workflows/ci.yml`, `.gitignore`(`target/`, `.dipper/`), `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `LICENSE`, `src/main.rs`, `src/lib.rs`, `src/cli.rs`, `src/error.rs`, `tests/cli.rs`, 그리고 이 계획서(`docs/PLAN.md`) 갱신
+- 3절 구조 중 PR1 표시 파일: `.cargo/config.toml`, `.github/workflows/ci.yml`, `.gitignore`(`/target`, `/.dipper`, `*.duckdb`, `*.duckdb.wal`), `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `LICENSE`, `src/main.rs`, `src/lib.rs`, `src/cli.rs`, `src/error.rs`, `tests/cli.rs`, 그리고 이 계획서(`docs/PLAN.md`) 갱신
 - 완료 기준
   - [ ] 루트에 MIT `LICENSE` 파일이 있고 저작권 줄이 `Copyright (c) 2026 funMango`이며, `Cargo.toml`의 `license = "MIT"`.
   - [ ] PR이 추가하는 파일이 3절 구조에서 PR1로 표시된 파일과 정확히 같다(그 외 파일·빈 폴더·자리만 잡는 모듈 없음, 수정 파일은 `docs/PLAN.md`만).
@@ -210,15 +210,53 @@ count_first = true
   - [ ] Windows CI에서 빌드한 `dipper.exe`가 VC++ 런타임 DLL에 의존하지 않는다(`dumpbin /dependents` 결과에 `VCRUNTIME*.dll`이 없음).
 
 ### PR2. 설정 로더와 원본 연결 확인
-- `dipper.toml` 스키마(여러 source, 여러 dip, `[performance]`), 환경변수 치환, `Source` 트레이트, SQLite 구현, Oracle 구현(feature `oracle`), `dipper check`
-- 완료 기준
-  - [ ] 필수 필드 누락, 존재하지 않는 source 참조, 중복된 dip 이름, 잘못된 식별자, 알 수 없는 `op`, 잘못된 `memory_limit` 형식에 대해 필드 경로가 포함된 오류 메시지와 종료코드 1(각각 테스트).
-  - [ ] 설정되지 않은 환경변수를 참조하면 변수 이름이 포함된 오류(값은 출력하지 않음).
-  - [ ] 원본 여러 개가 있는 설정에서 `dipper check`가 원본별로 `OK` 또는 실패 사유를 출력하고, 하나라도 실패하면 종료코드 1.
-  - [ ] 비밀번호 값이 어떤 출력·오류·로그에도 나타나지 않음을 테스트로 확인.
-  - [ ] SQLite 원본은 읽기 전용 플래그로 열린다(쓰기 시도가 실패하는 테스트).
-  - [ ] CI(Linux·Windows)에서 `cargo build --features oracle`이 성공한다.
-  - [ ] Instant Client가 없는 CI 환경에서 Oracle 원본으로 `dipper check`를 실행하면, 원래 오류 코드와 함께 "Oracle Instant Client를 찾을 수 없음, 설치 안내: docs/ORACLE_SETUP.md" 취지의 안내 메시지가 출력된다(테스트).
+- 범위: `dipper.toml` 로더(TOML, `serde` 스키마: 여러 source, 여러 dip, `[performance]`), `${VAR}` 환경변수 치환, 설정 검증(식별자 `^[A-Za-z_][A-Za-z0-9_$#.]*$` 포함), `Source` 트레이트(`test_connection()`, `select(&SelectSpec)` → 청크 반복자. 임의 SQL을 실행하는 공개 API 없음), 읽기 전용 SQLite 구현, Oracle 구현(feature `oracle`), `dipper check`.
+- 데이터 추출(`dipper dip`)은 PR3입니다. PR2에서 각 원본의 `select`는 시그니처만 갖추고 `NotImplemented("select")`를 반환합니다.
+- 파일: 3절 구조에서 PR2로 표시된 13개를 추가합니다(`src/commands/{mod,check}.rs`, `src/config/{mod,schema,env}.rs`, `src/source/{mod,sqlite,oracle}.rs`, `src/sql/{mod,ident}.rs`, `tests/common/mod.rs`, `tests/config.rs`, `tests/check.rs`). 수정은 `docs/PLAN.md`, `Cargo.toml`, `Cargo.lock`, `src/cli.rs`, `src/error.rs`, `src/lib.rs`, `tests/cli.rs`, `.github/workflows/ci.yml` 8개만 합니다.
+- 의존성: `serde`(derive), `toml`, `serde_path_to_error`(오류에 필드 경로 표시), `rusqlite`(bundled), `oracle`(optional, `oracle = ["dep:oracle"]`), `tracing`, `tracing-subscriber`(fmt). 개발용으로 `tempfile`, `sha2`를 추가합니다. `duckdb`는 PR3에서 추가합니다. `rust-version`은 추가한 의존성의 최소 버전에 맞춰 올립니다(`rusqlite` 0.41 기준 1.89).
+- 동작 규약
+  - 전역 옵션: `-c, --config <PATH>`(기본 `dipper.toml`), `-v, --verbose`(stderr에 debug 로그).
+  - 상대 경로(`store`, `temp_directory`, SQLite `path`)는 설정 파일이 있는 폴더를 기준으로 풉니다.
+  - 기본값: `store = ".dipper/store.duckdb"`, `batch_rows = 10000`, `memory_limit = "2GB"`, `temp_directory = ".dipper/tmp"`, `progress_every_rows = 1000000`, `count_first = false`. `sources`는 1개 이상 필요하고 `dips`는 비어 있어도 됩니다.
+  - 알 수 없는 키는 오류입니다(`deny_unknown_fields`).
+  - 환경변수 치환: source의 문자열 필드(`path`, `connect`, `user`, `password`)에서 `${NAME}`(NAME은 `[A-Za-z_][A-Za-z0-9_]*`)을 치환합니다. 설정되지 않은 변수는 필드 경로와 변수 이름을 담은 오류가 됩니다. `password`는 값 전체가 `${NAME}` 하나여야 하며, 직접 적은 값은 오류입니다(오류에 그 값을 넣지 않음).
+  - 비밀번호는 `Secret` 타입에 담습니다. `Debug`는 `***`로 표시하고 `Display`는 구현하지 않습니다.
+  - 설정 오류 메시지에는 설정 파일의 원문 줄(snippet)을 넣지 않고 `<파일>[:<줄>:<열>]: <필드 경로>: <메시지>` 형식만 씁니다. 원문 줄에 비밀번호가 있을 수 있어서입니다.
+  - 검증 항목: 필수 필드, dip의 `source`가 `sources`에 있는지, dip 이름 중복(대소문자 무시), dip 이름 형식(`^[A-Za-z_][A-Za-z0-9_]*$`, `_dipper`로 시작하거나 `__staging`으로 끝나면 안 됨), `table`·`columns`·필터 `column` 식별자(위 정규식 + 점으로 나눈 각 부분이 비어 있지 않음), `columns` 1개 이상·중복 없음, 필터 `op`(11종)와 값 모양(`is_null`·`not_null`은 값 없음, `in`은 비어 있지 않은 배열, `between`은 원소 2개 배열, 나머지는 단일 값), `limit`·`batch_rows`·`progress_every_rows`는 0보다 큼, `memory_limit`은 숫자(소수 가능) + 선택적 공백 + 단위 `KB|MB|GB|TB|KiB|MiB|GiB|TiB`(대소문자 무시)이고 0보다 큼.
+  - `dipper check` 출력(stdout): 원본 이름순으로 한 줄씩 `<name> (<kind>): OK` 또는 `<name> (<kind>): FAIL - <사유>`, 마지막 줄 `<n> of <m> sources OK`. 실패가 있으면 stderr에 `dipper: check failed: <k> of <m> sources failed`.
+  - 종료코드: 0 모든 원본 OK, 1 설정 오류(설정 파일 없음, 환경변수 미설정 포함) 또는 원본 하나 이상 실패, 2 사용법 오류·미구현 명령(`dip`, `tables`, `show`, `stats`, `export`). 설정 오류가 있으면 어떤 원본에도 접속하지 않습니다.
+  - SQLite: 생성 플래그 없이 `SQLITE_OPEN_READ_ONLY`로 열고 `SELECT 1 FROM sqlite_master LIMIT 1`로 확인합니다. 원본에는 SELECT 외의 문장(PRAGMA 포함)을 실행하지 않습니다.
+  - Oracle: 접속 후 `SELECT 1 FROM DUAL`로 확인합니다. 오류에 `DPI-1047`(Instant Client를 찾을 수 없음)이 있으면 원래 오류 뒤에 `Oracle Instant Client not found; see docs/ORACLE_SETUP.md`를 붙입니다. feature 없이 빌드한 경우 `kind = "oracle"` 원본은 설정 검증은 통과하고 check에서 `FAIL - oracle support is not built in (build with --features oracle)`가 됩니다.
+- PR1 후속 수정
+  - (a) `tests/cli.rs`의 `help_lists_subcommands`가 `contains("dip")`로 검사해서 `dipper`에도 걸립니다. 그래서 `dip` 서브커맨드가 빠져도 통과합니다. help 출력의 `Commands:` 절에서 각 줄의 첫 단어를 모아 `check, dip, tables, show, stats, export, help`와 순서까지 정확히 같은지 비교하도록 바꿉니다. 같은 파일의 미구현 검사는 `check`를 빼고 5개 명령만 확인합니다.
+  - (b) `.gitignore` 표기: main의 파일은 `/target`, `/.dipper`, `*.duckdb`, `*.duckdb.wal`로 PR1 작업 지시와 같고, 이 계획서 PR1 절만 `target/`, `.dipper/`로 달랐습니다. 계획서를 `/target`, `/.dipper`로 고쳐 파일과 맞춥니다(이 PR의 `docs/PLAN.md` 갱신에 포함, `.gitignore`는 수정하지 않음).
+- CI: `test` job(ubuntu·windows)에 기본 빌드 의존성 트리에 `oracle`·`odpic-sys`가 없는지 확인하는 단계, `cargo clippy --all-targets --features oracle --locked -- -D warnings`, `cargo test --features oracle --locked`를 추가합니다. `windows-exe` job은 기본 빌드와 `--features oracle` 빌드 둘 다 `dumpbin` 검사를 합니다(PR6 릴리스가 oracle feature로 빌드하므로).
+- 완료 기준 (검증봇이 명령으로 확인)
+  - [ ] `git diff --name-status origin/main...HEAD` 결과가 위 13개 파일 `A`와 8개 파일 `M`뿐이다. `src/main.rs`, `.gitignore`, `README.md`는 바뀌지 않는다.
+  - [ ] `docs/PLAN.md`가 PR2 작업 지시서에 적힌 sha256과 같다.
+  - [ ] `Cargo.toml`의 `[dependencies]`가 `anyhow`, `clap`, `thiserror`, `serde`, `toml`, `serde_path_to_error`, `rusqlite`(bundled), `oracle`(optional), `tracing`, `tracing-subscriber`뿐이고, `[dev-dependencies]`가 `assert_cmd`, `predicates`, `tempfile`, `sha2`뿐이며, `[features]`가 `default = []`, `oracle = ["dep:oracle"]`이다. `duckdb`가 없다.
+  - [ ] 기본 빌드에 Oracle 의존성이 없다: `cargo tree -e normal --locked --prefix none`에 `oracle ` 또는 `odpic-sys `로 시작하는 줄이 없고, `--features oracle`을 붙이면 `oracle `로 시작하는 줄이 있다(CI 단계).
+  - [ ] CI `test` job이 ubuntu·windows 둘 다 통과한다: fmt, 기본·oracle 각각 clippy `-D warnings`와 test, 의존성 트리 검사.
+  - [ ] CI `windows-exe` job이 기본·oracle 빌드 둘 다 통과한다: `dumpbin /dependents`에 `VCRUNTIME`, `api-ms-win-crt`가 없고 `dipper.exe --version`이 성공한다.
+  - [ ] `help_lists_subcommands`가 `Commands:` 절의 명령 목록을 정확히 비교한다. 로컬에서 `Command::Dip`에 `#[command(name = "dipx")]`를 임시로 붙이면 이 테스트가 실패한다(확인 후 되돌림).
+  - [ ] `dipper dip`, `tables`, `show`, `stats`, `export`는 종료코드 2, stderr에 `not implemented yet`.
+  - [ ] 설정 오류는 모두 종료코드 1이고 stderr에 다음 문자열이 들어 있다(각각 `tests/config.rs`의 테스트):
+    - 설정 파일 없음: `config file not found`와 경로
+    - dip에 `table` 누락: `dips[0]`, `table`
+    - 없는 source 참조: `dips[0].source`와 그 이름
+    - 중복된 dip 이름: `dips[1].name`, `duplicate`
+    - 잘못된 식별자(`table = "ORDERS; DROP"`): `dips[0].table`, `invalid identifier`
+    - 알 수 없는 `op`(`"contains"`): `dips[0].filters[0].op`, `contains`
+    - 잘못된 `memory_limit`(`"2 gigs"`): `performance.memory_limit`
+    - 알 수 없는 키(`colums`): `dips[0]`, `colums`
+    - 설정되지 않은 환경변수: `sources.company.password`, `DIPPER_TEST_UNSET_VAR`
+    - 직접 적은 비밀번호: `sources.company.password`, `${`
+  - [ ] 비밀번호 비노출: 비밀번호 환경변수 값을 `PR2-canary-7f1d9c`로 두고 `dipper --verbose check`를 실행하면 stdout·stderr 어디에도 이 문자열이 없다(기본·oracle 빌드 둘 다). 직접 적은 비밀번호 값과, 문법 오류가 있는 줄의 비밀번호 값도 오류 출력에 나타나지 않는다. 설정 구조체 `Debug` 출력에 비밀번호 값이 없다(단위 테스트).
+  - [ ] 원본 여러 개: 정상 SQLite 원본 2개면 종료코드 0, 두 줄 모두 `: OK`, 마지막 줄 `2 of 2 sources OK`. 정상 1개 + 없는 파일 1개면 종료코드 1, 없는 쪽 줄에 `FAIL -`와 그 경로, 마지막 줄 `1 of 2 sources OK`, stderr에 `check failed`. 실행 후에도 없는 파일은 생기지 않는다.
+  - [ ] SQLite가 아닌 파일을 원본으로 주면 그 원본은 `FAIL -`, 종료코드 1.
+  - [ ] 읽기 전용: `check` 전후로 SQLite 원본 파일의 SHA-256이 같고, 원본 폴더에 `-journal`, `-wal`, `-shm` 파일과 `.dipper/` 폴더가 생기지 않는다. `src/source/sqlite.rs` 단위 테스트에서 같은 연결로 `CREATE TABLE`과 `INSERT`를 시도하면 읽기 전용 오류로 실패한다.
+  - [ ] oracle 빌드: Instant Client가 없는 CI에서 oracle 원본을 `check`하면 종료코드 1, 그 줄에 `DPI-1047`과 `docs/ORACLE_SETUP.md`. 기본 빌드: 같은 설정에서 `oracle support is not built in`, 종료코드 1.
+  - [ ] `Source` 트레이트 메서드는 `name`, `kind`, `test_connection`, `select`뿐이고 SQL 문자열을 받는 공개 함수가 없다. `#[cfg(test)]` 밖에서 원본에 보내는 SQL은 `SELECT 1 FROM sqlite_master LIMIT 1`, `SELECT 1 FROM DUAL` 두 개뿐이다.
 
 ### PR3. 읽기 전용 대용량 추출 (`dipper dip`)
 - SELECT 생성, 바인드 파라미터, 청크 스트리밍, DuckDB 메모리 상한·임시 디렉터리, 스테이징 교체, 진행률, 여러 테이블 실행과 요약, `_dipper_runs`, `LoggingSource`, `--log-sql`, `--fail-fast`
@@ -267,7 +305,7 @@ count_first = true
   - [ ] 깨끗한 Linux·Windows 환경에서 Quickstart 명령을 순서대로 실행하면 에러 없이 끝까지 동작하고, CI 스모크 테스트가 같은 명령을 실행한다.
   - [ ] 테스트 태그(또는 `workflow_dispatch`)로 릴리스 워크플로를 실행하면 `dipper-<version>-windows-x86_64.zip`이 만들어지고, 그 안의 `dipper.exe --version`이 새 Windows 러너에서 추가 설치 없이 실행된다.
   - [ ] `docs/ORACLE_SETUP.md`가 있고 README에서 링크된다.
-  - [ ] README의 소개 부분(한 줄 소개, Why, Features)에는 특정 DB 제품명이 없다. 설치·Quickstart에 DB 이름을 쓸지는 결정 필요 4번을 따른다.
+  - [ ] README의 소개 부분(한 줄 소개, Why, Features)에는 특정 DB 제품명이 없다. 설치·Quickstart에 DB 이름을 쓸지는 결정 필요 3번을 따른다.
 
 ### PR7 (선택). Oracle 실연결 확인
 - 클라우드 에이전트는 회사 Oracle에 접속할 수 없으므로 코드 변경 없이 `docs/ORACLE_CHECKLIST.md`에 수동 확인 절차를 적고, 민호님 Windows PC에서 `dipper check`, `dipper dip`(여러 테이블)를 실행해 결과를 기록합니다.
@@ -285,15 +323,15 @@ count_first = true
 | 라이선스 | MIT (Copyright (c) 2026 funMango), PR1에 `LICENSE` 포함 |
 | 웹 서버/WAS | MVP에서 사용 안 함. 단일 CLI exe 유지, 나중에 `dipper serve`를 붙일 수 있게 lib/main 분리 유지 |
 | 폴더·파일 구조 | 3절 '폴더·파일 구조'대로 확정 |
+| 설정 파일 형식 | 설정 파일 형식은 TOML(`dipper.toml`)로 확정 (2026-11-05, 민호님 승인) |
 
 ## 6. 결정 필요
 
 1. **Oracle Instant Client 설치 가능 여부(미확인)**: 회사 Windows PC에 Instant Client를 설치하거나 사용자 폴더에 풀어 `PATH`에 추가할 수 있나요? 안 되면 Oracle 연결 방식을 다시 검토해야 합니다.
 2. **Oracle 실연결 확인(PR7)**을 민호님 PC에서 직접 해 주실 수 있나요? 회사 DB 접속 정보는 저장소나 봇에 저장하지 않는 것을 전제로 합니다.
-3. **설정 파일 형식**: TOML(`dipper.toml`)로 해도 될까요? 제안: TOML.
-4. **문서의 DB 이름 표기**: 소개 부분은 계속 "multiple databases"로 두고, 설치·Quickstart에서만 DuckDB와 Oracle 같은 실제 이름을 써도 될까요? 제안: 그렇게 함.
-5. **사용 방식**: 필터를 설정 파일에 적는 방식이면 "SQL 몰라도 쓴다"는 목표에 충분한가요, 아니면 MVP에 테이블·컬럼을 대화형으로 고르는 기능이 필요한가요? 제안: MVP는 설정 파일 방식.
-6. **회사 PC 자원**: 기본 메모리 상한 2GB와, 수십 GB 이상일 수 있는 DuckDB 파일·임시 파일을 둘 디스크 공간이 괜찮나요? 대략적인 PC 메모리와 남은 디스크 용량을 알려 주시면 기본값을 맞춥니다.
+3. **문서의 DB 이름 표기**: 소개 부분은 계속 "multiple databases"로 두고, 설치·Quickstart에서만 DuckDB와 Oracle 같은 실제 이름을 써도 될까요? 제안: 그렇게 함.
+4. **사용 방식**: 필터를 설정 파일에 적는 방식이면 "SQL 몰라도 쓴다"는 목표에 충분한가요, 아니면 MVP에 테이블·컬럼을 대화형으로 고르는 기능이 필요한가요? 제안: MVP는 설정 파일 방식.
+5. **회사 PC 자원**: 기본 메모리 상한 2GB와, 수십 GB 이상일 수 있는 DuckDB 파일·임시 파일을 둘 디스크 공간이 괜찮나요? 대략적인 PC 메모리와 남은 디스크 용량을 알려 주시면 기본값을 맞춥니다.
 
 ## 7. MVP 이후: 시계열 갱신 설계 초안
 
