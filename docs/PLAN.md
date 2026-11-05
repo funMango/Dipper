@@ -28,7 +28,8 @@
 
 ### 제외 (MVP 이후)
 - **시계열 갱신(1년치 유지 + 매일 어제 데이터 추가 + 1년 지난 데이터 삭제)**: MVP 이후 1순위. 설계 초안은 7절.
-- GUI/웹 UI, 클라우드 배포 자동화(클라우드에서는 같은 실행 파일을 VM에서 실행하는 수준만)
+- GUI/웹 UI, 웹 서버/WAS(`dipper serve` 같은 서버 모드는 MVP 이후. 라이브러리(`lib.rs`)와 CLI(`main.rs`)를 분리해 두어 나중에 붙일 수 있게 함)
+- 클라우드 배포 자동화(클라우드에서는 같은 실행 파일을 VM에서 실행하는 수준만)
 - 내장 스케줄러, 전문 검색, 자연어 질의, 여러 원본 간 조인
 - CDC/로그 기반 실시간 동기화, 원본에 쓰기, 다중 사용자/권한
 - 테이블 간 병렬 추출(MVP는 테이블을 순서대로 처리)
@@ -63,7 +64,91 @@
 - `store`: DuckDB 적재(Appender 사용), 스테이징 테이블 교체, 메타 테이블 `_dipper_runs`
 - `pipeline`: 원본 청크 → DuckDB 적재 스트리밍 루프, 진행률, 메모리 상한 적용
 - `query`: 로컬 조회·통계·내보내기
-- `audit`: 원본에 실행된 모든 SQL 문을 기록하는 `LoggingSource` 래퍼(테스트와 `--log-sql` 옵션에서 사용)
+- `source::logging`: 원본에 실행된 모든 SQL 문을 기록하는 `LoggingSource` 래퍼(테스트와 `--log-sql` 옵션에서 사용)
+- `cli`, `commands`: clap 정의와 명령별 처리. 명령 처리는 라이브러리 함수를 호출하고 출력만 담당하므로, 나중에 서버 모드가 같은 라이브러리를 그대로 쓸 수 있습니다.
+- `error`: 공통 오류 타입과 종료코드 매핑(0 성공, 1 설정·실행 오류, 2 사용법 오류·미구현)
+
+### 폴더·파일 구조 (확정)
+
+규칙
+- 구현이 여러 개이거나 하위 관심사가 둘 이상인 모듈은 폴더(`모듈/mod.rs` + 하위 파일), 하나뿐인 모듈은 단일 파일(`모듈.rs`)로 둡니다. 폴더 모듈은 모두 `mod.rs` 방식으로 통일합니다.
+- 단위 테스트는 각 파일 안의 `#[cfg(test)] mod tests`, CLI·통합 테스트는 루트 `tests/`에 둡니다. 테스트 공용 도우미는 `tests/common/mod.rs`.
+- 각 파일은 오른쪽에 적은 PR에서 처음 만듭니다. 그 PR 전에 빈 파일이나 자리만 잡는 파일을 미리 만들지 않습니다.
+
+```text
+Dipper/
+├── .cargo/
+│   └── config.toml              # Windows MSVC 정적 CRT                    PR1
+├── .github/
+│   └── workflows/
+│       ├── ci.yml               # fmt·clippy·test, ubuntu+windows, exe 의존성 검사   PR1
+│       ├── perf.yml             # 대용량 성능 테스트(수동 실행)                 PR5
+│       └── release.yml          # v* 태그 → dipper.exe zip 릴리스            PR6
+├── .gitignore                                                          PR1
+├── Cargo.toml                                                          PR1
+├── Cargo.lock                   # 바이너리 프로젝트라 커밋                       PR1
+├── rust-toolchain.toml          # stable + rustfmt, clippy                  PR1
+├── LICENSE                      # MIT, Copyright (c) 2026 funMango          PR1
+├── README.md                                                           (기존, PR6에서 갱신)
+├── docs/
+│   ├── PLAN.md                                                         (기존)
+│   ├── PERFORMANCE.md                                                  PR5
+│   ├── ORACLE_SETUP.md                                                 PR6
+│   └── ORACLE_CHECKLIST.md                                             PR7
+├── examples/
+│   ├── gen_large.rs             # 대용량 테스트 데이터 생성                     PR5
+│   ├── make_sample.rs           # Quickstart용 샘플 SQLite DB 생성             PR6
+│   └── dipper.example.toml                                             PR6
+├── src/
+│   ├── main.rs                  # 얇은 진입점: cli 실행 → 종료코드               PR1
+│   ├── lib.rs                   # 모듈 선언, 공개 API                         PR1
+│   ├── cli.rs                   # clap 정의와 명령 분기                        PR1
+│   ├── error.rs                 # DipperError, 종료코드 매핑                   PR1
+│   ├── commands/
+│   │   ├── mod.rs                                                      PR2
+│   │   ├── check.rs                                                    PR2
+│   │   ├── dip.rs                                                      PR3
+│   │   ├── tables.rs                                                   PR4
+│   │   ├── show.rs                                                     PR4
+│   │   ├── stats.rs                                                    PR4
+│   │   └── export.rs                                                   PR4
+│   ├── config/
+│   │   ├── mod.rs               # 로드·검증 진입점                           PR2
+│   │   ├── schema.rs            # serde 구조체(sources, dips, performance)   PR2
+│   │   └── env.rs               # ${VAR} 치환                              PR2
+│   ├── source/
+│   │   ├── mod.rs               # Source 트레이트, SelectSpec, Chunk        PR2
+│   │   ├── sqlite.rs                                                   PR2
+│   │   ├── oracle.rs            # #[cfg(feature = "oracle")]             PR2
+│   │   └── logging.rs           # LoggingSource                          PR3
+│   ├── sql/
+│   │   ├── mod.rs                                                      PR2
+│   │   ├── ident.rs             # 식별자 검증·인용                           PR2
+│   │   ├── filter.rs            # 필터 → WHERE + 바인드                      PR3
+│   │   └── dialect.rs           # 방언별 인용·플레이스홀더                     PR3
+│   ├── store/
+│   │   ├── mod.rs               # DuckDB 열기, memory_limit, temp_directory PR3
+│   │   ├── load.rs              # Appender 적재, 스테이징 교체                PR3
+│   │   └── meta.rs              # _dipper_runs                           PR3
+│   ├── pipeline/
+│   │   ├── mod.rs               # 원본 청크 → 적재 루프, 여러 dip 실행·요약     PR3
+│   │   └── progress.rs          # indicatif / 비대화형 로그                  PR3
+│   └── query/
+│       ├── mod.rs                                                      PR4
+│       ├── show.rs                                                     PR4
+│       ├── stats.rs                                                    PR4
+│       └── export.rs                                                   PR4
+└── tests/
+    ├── cli.rs                   # --version, --help, 미구현 명령             PR1
+    ├── common/
+    │   └── mod.rs               # SQLite 테스트 원본·설정 생성 도우미           PR2
+    ├── config.rs                                                       PR2
+    ├── check.rs                                                        PR2
+    ├── dip.rs                                                          PR3
+    ├── readonly.rs              # SELECT 전용·SHA-256·바인드 검증             PR3
+    ├── query.rs                                                        PR4
+    └── perf.rs                  # 20만 행 스모크 + #[ignore] 500만 행          PR5
+```
 
 타입 매핑: 정수 → BIGINT, 실수/NUMBER(소수) → DOUBLE, 문자 → VARCHAR, 날짜 → DATE, 일시 → TIMESTAMP, NULL 유지, 그 외 → VARCHAR 문자열화.
 
@@ -115,8 +200,10 @@ count_first = true
 각 PR은 `main`에서 새 브랜치로 만들고, CI가 Linux·Windows 모두에서 초록이어야 하며, 머지는 민호님 승인 후에만 합니다. 모든 PR 공통 기준: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`가 `ubuntu-latest`와 `windows-latest`에서 통과.
 
 ### PR1. 프로젝트 뼈대
-- `Cargo.toml`, `src/main.rs`, `src/lib.rs`, clap 엔트리, `.gitignore`(`target/`, `.dipper/`), `.cargo/config.toml`(Windows 정적 CRT), GitHub Actions 워크플로(Linux·Windows 매트릭스)
+- 3절 구조 중 PR1 표시 파일: `.cargo/config.toml`, `.github/workflows/ci.yml`, `.gitignore`(`target/`, `.dipper/`), `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `LICENSE`, `src/main.rs`, `src/lib.rs`, `src/cli.rs`, `src/error.rs`, `tests/cli.rs`, 그리고 이 계획서(`docs/PLAN.md`) 갱신
 - 완료 기준
+  - [ ] 루트에 MIT `LICENSE` 파일이 있고 저작권 줄이 `Copyright (c) 2026 funMango`이며, `Cargo.toml`의 `license = "MIT"`.
+  - [ ] PR이 추가하는 파일이 3절 구조에서 PR1로 표시된 파일과 정확히 같다(그 외 파일·빈 폴더·자리만 잡는 모듈 없음, 수정 파일은 `docs/PLAN.md`만).
   - [ ] `cargo build` 후 `dipper --version`이 `Cargo.toml` 버전을 출력하고 `dipper --help`에 서브커맨드 자리(`check`, `dip`, `tables`, `show`, `stats`, `export`)가 보인다(구현 전 명령은 "not implemented yet"과 종료코드 2).
   - [ ] CLI 테스트(`assert_cmd`)로 `--version` 출력을 확인한다.
   - [ ] PR에서 CI(fmt, clippy, test)가 Linux와 Windows 둘 다 통과한다.
@@ -195,6 +282,9 @@ count_first = true
 | 시계열 갱신(1년치 유지 + 매일 추가) | MVP에서 제외, MVP 이후 1순위로 진행(7절) |
 | 주 사용 환경 | 회사 PC는 Windows. 단일 `dipper.exe` 배포, CI에 Windows 포함 |
 | 데이터 규모 | 매우 크고 테이블이 여러 개(정확한 행 수 미상). 대용량 스트리밍 적재, 메모리 상한, 진행률, 여러 테이블 실행, 성능 테스트를 MVP에 포함 |
+| 라이선스 | MIT (Copyright (c) 2026 funMango), PR1에 `LICENSE` 포함 |
+| 웹 서버/WAS | MVP에서 사용 안 함. 단일 CLI exe 유지, 나중에 `dipper serve`를 붙일 수 있게 lib/main 분리 유지 |
+| 폴더·파일 구조 | 3절 '폴더·파일 구조'대로 확정 |
 
 ## 6. 결정 필요
 
@@ -203,8 +293,7 @@ count_first = true
 3. **설정 파일 형식**: TOML(`dipper.toml`)로 해도 될까요? 제안: TOML.
 4. **문서의 DB 이름 표기**: 소개 부분은 계속 "multiple databases"로 두고, 설치·Quickstart에서만 DuckDB와 Oracle 같은 실제 이름을 써도 될까요? 제안: 그렇게 함.
 5. **사용 방식**: 필터를 설정 파일에 적는 방식이면 "SQL 몰라도 쓴다"는 목표에 충분한가요, 아니면 MVP에 테이블·컬럼을 대화형으로 고르는 기능이 필요한가요? 제안: MVP는 설정 파일 방식.
-6. **라이선스**: MIT와 Apache-2.0 중 어느 쪽으로 할까요? 제안: MIT. (결정되면 LICENSE 파일을 PR1에 추가)
-7. **회사 PC 자원**: 기본 메모리 상한 2GB와, 수십 GB 이상일 수 있는 DuckDB 파일·임시 파일을 둘 디스크 공간이 괜찮나요? 대략적인 PC 메모리와 남은 디스크 용량을 알려 주시면 기본값을 맞춥니다.
+6. **회사 PC 자원**: 기본 메모리 상한 2GB와, 수십 GB 이상일 수 있는 DuckDB 파일·임시 파일을 둘 디스크 공간이 괜찮나요? 대략적인 PC 메모리와 남은 디스크 용량을 알려 주시면 기본값을 맞춥니다.
 
 ## 7. MVP 이후: 시계열 갱신 설계 초안
 
