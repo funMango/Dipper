@@ -1,0 +1,33 @@
+[package]
+name = "dipper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/funMango/Dipper"
+description = "Dipper picks only the data you need out of multiple large databases and moves it into a small store, so you can search and analyze it quickly on your own PC or in the cloud."
+
+[lib]
+name = "dipper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dipper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[features]
+default = []
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
