@@ -45,7 +45,7 @@ fn help_lists_subcommands() {
 
 #[test]
 fn subcommands_are_not_implemented() {
-    for name in ["check", "dip", "tables", "show", "stats", "export"] {
+    for name in ["dip", "tables", "show", "stats", "export"] {
         Command::cargo_bin("dipper")
             .unwrap()
             .arg(name)
@@ -68,4 +68,18 @@ fn no_args_shows_usage() {
         combined.contains("Usage"),
         "expected Usage in output, got: {combined}"
     );
+}
+
+#[test]
+fn check_without_config_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::cargo_bin("dipper")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("check")
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr);
+    assert!(stderr.contains("config file not found"), "stderr: {stderr}");
+    assert!(stderr.contains("dipper.toml"), "stderr: {stderr}");
 }

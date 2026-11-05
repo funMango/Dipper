@@ -345,3 +345,224 @@ fn parse_memory_limit_units() {
         assert!(parse_memory_limit(bad).is_err(), "{bad}");
     }
 }
+
+fn run_check(toml_text: &str) -> (i32, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_config(dir.path(), toml_text);
+    let output = common::dipper()
+        .args(["check", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn assert_check_error(toml_text: &str, needles: &[&str]) {
+    let (code, stdout, stderr) = run_check(toml_text);
+    assert_eq!(code, 1, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    for needle in needles {
+        assert!(
+            stderr.contains(needle),
+            "missing {needle} in stderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn cli_missing_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("absent.toml");
+    let output = common::dipper()
+        .args(["check", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("config file not found"), "{stderr}");
+    assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+}
+
+#[test]
+fn cli_missing_table() {
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+columns = ["ORDER_ID"]
+"#,
+        &["dips[0]", "table"],
+    );
+}
+
+#[test]
+fn cli_unknown_source() {
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "nope"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+"#,
+        &["dips[0].source", "nope"],
+    );
+}
+
+#[test]
+fn cli_duplicate_dip_name() {
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+
+[[dips]]
+name = "Orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+"#,
+        &["dips[1].name", "duplicate"],
+    );
+}
+
+#[test]
+fn cli_invalid_identifier() {
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS; DROP"
+columns = ["ORDER_ID"]
+"#,
+        &["dips[0].table", "invalid identifier"],
+    );
+}
+
+#[test]
+fn cli_unknown_filter_op() {
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+filters = [{ column = "STATUS", op = "contains", value = "X" }]
+"#,
+        &["dips[0].filters[0].op", "contains"],
+    );
+}
+
+#[test]
+fn cli_invalid_memory_limit() {
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[performance]
+memory_limit = "2 gigs"
+"#,
+        &["performance.memory_limit"],
+    );
+}
+
+#[test]
+fn cli_unknown_key() {
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+colums = ["ORDER_ID"]
+"#,
+        &["dips[0]", "colums"],
+    );
+}
+
+#[test]
+fn cli_unset_password_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_config(
+        dir.path(),
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1/NOPE"
+user = "scott"
+password = "${DIPPER_TEST_UNSET_VAR}"
+"#,
+    );
+    let output = common::dipper()
+        .env_remove("DIPPER_TEST_UNSET_VAR")
+        .args(["check", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sources.company.password"), "{stderr}");
+    assert!(stderr.contains("DIPPER_TEST_UNSET_VAR"), "{stderr}");
+}
+
+#[test]
+fn cli_literal_password_is_rejected_without_echo() {
+    let (code, stdout, stderr) = run_check(
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1/NOPE"
+user = "scott"
+password = "PR2-canary-literal"
+"#,
+    );
+    assert_eq!(code, 1);
+    assert!(stderr.contains("sources.company.password"), "{stderr}");
+    assert!(stderr.contains("${"), "{stderr}");
+    assert!(!stderr.contains("PR2-canary-literal"), "{stderr}");
+    assert!(!stdout.contains("PR2-canary-literal"), "{stdout}");
+}
+
+#[test]
+fn cli_password_syntax_error_hides_value() {
+    let (code, stdout, stderr) = run_check("password = \"PR2-canary-syntax\n");
+    assert_eq!(code, 1, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(!stderr.contains("PR2-canary-syntax"), "{stderr}");
+    assert!(!stdout.contains("PR2-canary-syntax"), "{stdout}");
+}

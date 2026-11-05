@@ -19,7 +19,14 @@ impl OracleSource {
                 name: name.to_string(),
                 conn,
             }),
-            Err(err) => Err(oracle_error(name, &err)),
+            Err(err) => {
+                let mut text = err.to_string();
+                let secret = password.expose();
+                if !secret.is_empty() {
+                    text = text.replace(secret, "***");
+                }
+                Err(oracle_error_message(name, text))
+            }
         }
     }
 }
@@ -37,7 +44,7 @@ impl Source for OracleSource {
         self.conn
             .query_row_as::<i32>("SELECT 1 FROM DUAL", &[])
             .map(|_| ())
-            .map_err(|err| oracle_error(&self.name, &err))
+            .map_err(|err| oracle_error_message(&self.name, err.to_string()))
     }
 
     fn select<'a>(&'a self, spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError> {
@@ -46,8 +53,7 @@ impl Source for OracleSource {
     }
 }
 
-fn oracle_error(name: &str, err: &oracle::Error) -> DipperError {
-    let text = err.to_string();
+fn oracle_error_message(name: &str, text: String) -> DipperError {
     let message = if text.contains("DPI-1047") {
         format!("{text}; Oracle Instant Client not found; see docs/ORACLE_SETUP.md")
     } else {
