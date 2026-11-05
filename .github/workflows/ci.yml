@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  windows-exe:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Show dumpbin dependents and reject CRT DLLs
+        shell: pwsh
+        run: |
+          $output = & dumpbin /dependents target\release\dipper.exe | Out-String
+          Write-Output $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($output.Contains('VCRUNTIME') -or $output.Contains('api-ms-win-crt')) { exit 1 }
+      - name: Run dipper.exe --version
+        run: target\release\dipper.exe --version
