@@ -13,17 +13,34 @@ fn version_prints_package_version() {
 
 #[test]
 fn help_lists_subcommands() {
-    Command::cargo_bin("dipper")
+    let output = Command::cargo_bin("dipper")
         .unwrap()
         .arg("--help")
-        .assert()
-        .code(0)
-        .stdout(predicate::str::contains("check"))
-        .stdout(predicate::str::contains("dip"))
-        .stdout(predicate::str::contains("tables"))
-        .stdout(predicate::str::contains("show"))
-        .stdout(predicate::str::contains("stats"))
-        .stdout(predicate::str::contains("export"));
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut lines = stdout.lines();
+    let commands_at = lines.position(|line| line == "Commands:");
+    assert!(
+        commands_at.is_some(),
+        "Commands: section not found in:\n{stdout}"
+    );
+    let mut commands = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            break;
+        }
+        let trimmed = line.trim_start();
+        let word = trimmed.split(' ').next().unwrap_or("");
+        if !word.is_empty() {
+            commands.push(word);
+        }
+    }
+    assert_eq!(
+        commands,
+        ["check", "dip", "tables", "show", "stats", "export", "help"]
+    );
 }
 
 #[test]
