@@ -561,8 +561,49 @@ password = "PR2-canary-literal"
 
 #[test]
 fn cli_password_syntax_error_hides_value() {
-    let (code, stdout, stderr) = run_check("password = \"PR2-canary-syntax\n");
-    assert_eq!(code, 1, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(!stderr.contains("PR2-canary-syntax"), "{stderr}");
-    assert!(!stdout.contains("PR2-canary-syntax"), "{stdout}");
+    let cases = [
+        "password = \"PR2-canary-syntax\n",
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "c"
+user = "u"
+password = "PR2-canary-syntax
+"#,
+    ];
+    for toml_text in cases {
+        let (code, stdout, stderr) = run_check(toml_text);
+        assert_eq!(code, 1, "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(!stderr.contains("PR2-canary-syntax"), "{stderr}");
+        assert!(!stdout.contains("PR2-canary-syntax"), "{stdout}");
+    }
+}
+
+#[test]
+fn cli_non_string_password_is_not_echoed() {
+    for value in ["987654321", "1234.5678", "true"] {
+        let toml_text = format!(
+            r#"
+[sources.company]
+kind = "oracle"
+connect = "c"
+user = "u"
+password = {value}
+"#
+        );
+        let (code, stdout, stderr) = run_check(&toml_text);
+        assert_eq!(code, 1, "{value}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stderr.contains("sources.company.password"),
+            "{value} path missing in stderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains(value),
+            "{value} leaked in stderr:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains(value),
+            "{value} leaked in stdout:\n{stdout}"
+        );
+    }
 }

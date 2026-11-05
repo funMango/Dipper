@@ -11,7 +11,7 @@ use crate::error::{ConfigIssue, DipperError};
 use crate::sql::{validate_dip_name, validate_ident};
 use schema::{
     RawConfig, RawPerformance, RawSource, DEFAULT_BATCH_ROWS, DEFAULT_MEMORY_LIMIT,
-    DEFAULT_PROGRESS_EVERY_ROWS, DEFAULT_STORE, DEFAULT_TEMP_DIRECTORY,
+    DEFAULT_PROGRESS_EVERY_ROWS, DEFAULT_STORE, DEFAULT_TEMP_DIRECTORY, PASSWORD_MUST_BE_STRING,
 };
 
 /// Load `path`, substituting environment variables from the process environment.
@@ -182,10 +182,22 @@ fn toml_issue(text: &str, path: &str, err: &toml::de::Error) -> ConfigIssue {
     } else {
         path.to_string()
     };
+    let message = err.message().to_string();
+    // Internally tagged source tables report this type error on the source,
+    // not on the password field. The message never contains the rejected value.
+    let path = if message == PASSWORD_MUST_BE_STRING && !path.ends_with(".password") {
+        if path.is_empty() {
+            "password".to_string()
+        } else {
+            format!("{path}.password")
+        }
+    } else {
+        path
+    };
     ConfigIssue {
         path,
         line_col: err.span().map(|span| offset_to_line_col(text, span.start)),
-        message: err.message().to_string(),
+        message,
     }
 }
 
@@ -439,7 +451,7 @@ fn substitute_sources(
                 let password_field = format!("sources.{name}.password");
                 let connect = substitute(connect, &connect_field, lookup);
                 let user = substitute(user, &user_field, lookup);
-                let password = substitute_secret(password, &password_field, lookup);
+                let password = substitute_secret(password.as_str(), &password_field, lookup);
                 match (connect, user, password) {
                     (Ok(connect), Ok(user), Ok(password)) => {
                         sources.insert(

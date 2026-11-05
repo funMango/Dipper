@@ -20,10 +20,7 @@ pub fn substitute(
         }
         let body = &after[1..];
         let Some(end) = body.find('}') else {
-            return Err(issue(
-                field_path,
-                format!("unclosed environment variable reference ${{{body}"),
-            ));
+            return Err(issue(field_path, "unclosed ${"));
         };
         let name = &body[..end];
         if !valid_env_name(name) {
@@ -122,10 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn unclosed_reference_names_the_variable() {
+    fn unclosed_reference_omits_the_value() {
         let err = substitute("pre ${NAME", "field.path", &lookup).unwrap_err();
         assert_eq!(err.path, "field.path");
-        assert!(err.message.contains("NAME"), "{}", err.message);
+        assert_eq!(err.message, "unclosed ${");
+        assert!(!err.message.contains("NAME"));
     }
 
     #[test]
