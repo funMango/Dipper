@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use crate::error::DipperError;
@@ -11,6 +13,14 @@ use crate::error::DipperError;
     arg_required_else_help = true
 )]
 pub struct Cli {
+    /// Configuration file.
+    #[arg(short, long, global = true, default_value = "dipper.toml")]
+    config: PathBuf,
+
+    /// Print debug logs on stderr.
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -32,10 +42,24 @@ pub enum Command {
     Export,
 }
 
-/// Run a parsed command. Every command is a placeholder until a later PR.
+/// Run a parsed command.
 pub fn run(cli: Cli) -> Result<(), DipperError> {
+    let level = if cli.verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::WARN
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(level)
+        .try_init();
+
     match cli.command {
-        Command::Check => Err(DipperError::NotImplemented("check")),
+        Command::Check => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            crate::commands::check::run(&cli.config, &mut handle)
+        }
         Command::Dip => Err(DipperError::NotImplemented("dip")),
         Command::Tables => Err(DipperError::NotImplemented("tables")),
         Command::Show => Err(DipperError::NotImplemented("show")),

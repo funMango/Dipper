@@ -22,15 +22,35 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - name: Default build has no Oracle dependency
+        shell: bash
+        run: |
+          tree="$(cargo tree -e normal --locked --prefix none)"
+          echo "$tree"
+          if echo "$tree" | grep -E '^(oracle|odpic-sys) '; then
+            echo "oracle dependency found in default build"; exit 1
+          fi
+          cargo tree -e normal --locked --prefix none --features oracle | grep -E '^oracle '
+      - run: cargo clippy --all-targets --features oracle --locked -- -D warnings
+      - run: cargo test --features oracle --locked
 
   windows-exe:
+    name: windows-exe (${{ matrix.name }})
     runs-on: windows-latest
     needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            build_args: ""
+          - name: oracle
+            build_args: "--features oracle"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked ${{ matrix.build_args }}
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Show dumpbin dependents and reject CRT DLLs
         shell: pwsh

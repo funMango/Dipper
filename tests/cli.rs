@@ -13,22 +13,39 @@ fn version_prints_package_version() {
 
 #[test]
 fn help_lists_subcommands() {
-    Command::cargo_bin("dipper")
+    let output = Command::cargo_bin("dipper")
         .unwrap()
         .arg("--help")
-        .assert()
-        .code(0)
-        .stdout(predicate::str::contains("check"))
-        .stdout(predicate::str::contains("dip"))
-        .stdout(predicate::str::contains("tables"))
-        .stdout(predicate::str::contains("show"))
-        .stdout(predicate::str::contains("stats"))
-        .stdout(predicate::str::contains("export"));
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut lines = stdout.lines();
+    let commands_at = lines.position(|line| line == "Commands:");
+    assert!(
+        commands_at.is_some(),
+        "Commands: section not found in:\n{stdout}"
+    );
+    let mut commands = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            break;
+        }
+        let trimmed = line.trim_start();
+        let word = trimmed.split(' ').next().unwrap_or("");
+        if !word.is_empty() {
+            commands.push(word);
+        }
+    }
+    assert_eq!(
+        commands,
+        ["check", "dip", "tables", "show", "stats", "export", "help"]
+    );
 }
 
 #[test]
 fn subcommands_are_not_implemented() {
-    for name in ["check", "dip", "tables", "show", "stats", "export"] {
+    for name in ["dip", "tables", "show", "stats", "export"] {
         Command::cargo_bin("dipper")
             .unwrap()
             .arg(name)
@@ -51,4 +68,18 @@ fn no_args_shows_usage() {
         combined.contains("Usage"),
         "expected Usage in output, got: {combined}"
     );
+}
+
+#[test]
+fn check_without_config_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::cargo_bin("dipper")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("check")
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr);
+    assert!(stderr.contains("config file not found"), "stderr: {stderr}");
+    assert!(stderr.contains("dipper.toml"), "stderr: {stderr}");
 }
