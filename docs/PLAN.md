@@ -6,7 +6,7 @@
 - 확정 사항: 언어 **Rust**, 로컬 저장소 **DuckDB**, 주 사용 환경 **Windows**(단일 `dipper.exe` 배포). 다른 검색 엔진·서버형 DB는 쓰지 않으며, 전문(full-text) 검색은 MVP 이후로 미룹니다.
 - 제품 원칙: 원본 DB와 그 인덱스는 읽기 전용으로만 다루고, 사용자는 SQL 없이 설정 파일과 명령어만으로 사용합니다. 제품은 특정 원본 DB에 묶이지 않습니다.
 - 전제: 원본 데이터는 **매우 크고 테이블이 여러 개**입니다(정확한 행 수는 미상). 모든 설계는 메모리에 다 올리지 않는 스트리밍 적재를 기본으로 합니다.
-- 진행 상태(2026-11-05): PR1·PR2 머지 완료. **PR3a·PR3b 코드 작업은 보류**합니다. 6절 결정 필요 6~12번에 민호님 답을 받은 뒤 이 계획을 고쳐 착수합니다. 이 문서의 PR3a·PR3b 내용과 PR3을 둘로 나누는 안은 모두 제안입니다.
+- 진행 상태(2026-11-06): PR1·PR2 머지 완료. PR3 계획(`docs/PLAN.md`)은 PR #5로 머지됨. 결정 필요 1·6~9·11·12번은 2026-11-06 민호님 결정으로 확정(5절). **PR3a 코드는 이 PLAN 갱신이 머지된 뒤** 착수합니다. 회사 Oracle 서버 버전(6절 10번)은 PR7에서 확인합니다.
 
 ## 1. MVP 목표
 
@@ -79,7 +79,7 @@
 - 구현이 여러 개이거나 하위 관심사가 둘 이상인 모듈은 폴더(`모듈/mod.rs` + 하위 파일), 하나뿐인 모듈은 단일 파일(`모듈.rs`)로 둡니다. 폴더 모듈은 모두 `mod.rs` 방식으로 통일합니다.
 - 단위 테스트는 각 파일 안의 `#[cfg(test)] mod tests`, CLI·통합 테스트는 루트 `tests/`에 둡니다. 테스트 공용 도우미는 `tests/common/mod.rs`.
 - 각 파일은 오른쪽에 적은 PR에서 처음 만듭니다. 그 PR 전에 빈 파일이나 자리만 잡는 파일을 미리 만들지 않습니다.
-- PR3a·PR3b로 표시한 파일은 보류 중인 PR3 계획(제안)을 따른 것이며, 결정 필요 6~12번 답에 따라 바뀔 수 있습니다.
+- PR3a·PR3b로 표시한 파일은 PR3 계획을 따릅니다(2026-11-06 결정 반영). 회사 Oracle 서버 버전(6절 10번) 확인 결과에 따라 세부만 달라질 수 있습니다.
 
 ```text
 Dipper/
@@ -162,7 +162,7 @@ Dipper/
     └── perf.rs                  # 20만 행 스모크 + #[ignore] 500만 행          PR5
 ```
 
-타입 매핑: 정수 → BIGINT, 실수/NUMBER(소수) → DOUBLE, 문자 → VARCHAR, 날짜 → DATE, 일시 → TIMESTAMP, NULL 유지, 그 외 → VARCHAR 문자열화. Oracle `NUMBER(p,0)`(p ≤ 18) → BIGINT, `NUMBER(p,s>0)`·`FLOAT`·`BINARY_FLOAT/DOUBLE` → DOUBLE, 정밀도 없는 `NUMBER` → VARCHAR(손실 없는 10진 문자열, 제안, 결정 필요 12번). SQLite는 저장 클래스(INTEGER, REAL, TEXT, NULL)를 그대로 쓰고 BLOB은 16진 문자열로 바꿉니다.
+타입 매핑: 정수 → BIGINT, 실수/NUMBER(소수) → DOUBLE, 문자 → VARCHAR, 날짜 → DATE, 일시 → TIMESTAMP, NULL 유지, 그 외 → VARCHAR 문자열화. Oracle `NUMBER(p,0)`(p ≤ 18) → BIGINT, `NUMBER(p,s>0)`·`FLOAT`·`BINARY_FLOAT/DOUBLE` → DOUBLE, 정밀도 없는 `NUMBER` → VARCHAR(손실 없는 10진 문자열, 2026-11-06 결정). SQLite는 저장 클래스(INTEGER, REAL, TEXT, NULL)를 그대로 쓰고 BLOB은 16진 문자열로 바꿉니다.
 
 ### 대용량 처리 방식
 - **스트리밍**: 원본에서 페이징 키 순서로 `batch_rows`(기본 10,000)행씩 읽어 바로 DuckDB Appender로 넘기고, 청크를 버린 뒤 다음 청크를 읽습니다. 결과 전체를 메모리에 모으는 코드 경로는 없습니다. 청크 하나는 읽기 전용 트랜잭션 하나이며(아래 '원본 읽기 전용 다중 방어'), 트랜잭션을 짧게 유지해 ORA-01555(snapshot too old)를 피합니다.
@@ -174,7 +174,7 @@ Dipper/
 
 ### 원본 읽기 전용 다중 방어
 
-원칙은 확정입니다(2026-11-05 민호님 승인, 5절). 아래 층별 방식, 사전 점검 정책, 페이징, 기본값은 계획(제안)이며 6절 결정 필요 6~12번에서 확인합니다.
+원칙은 확정입니다(2026-11-05 민호님 승인, 5절). 층별 방식·사전 점검 정책·페이징·시간 제한·23ai READ_ONLY·NUMBER 매핑은 2026-11-06 민호님 결정으로 확정(5절). 회사 Oracle 서버 버전 숫자는 아직 미확인(6절 10번, PR7에서 확인).
 
 원본 DB는 어떤 경우에도 읽기 전용입니다. 원본 계정에 쓰기 권한이 **있다고 가정**하고, SQL 문자열 검사만으로는 부족하므로 Dipper 코드 쪽에서 여러 층으로 막습니다. DB 쪽 설정(DBA 권한 조정, 프로파일, Resource Manager, 감사, 복제본)은 이 계획의 범위 밖입니다.
 
@@ -185,8 +185,8 @@ Dipper/
 | L1 문장 통로 | 원본 드라이버에 SQL을 넘기는 코드는 `source/sqlite.rs`, `source/oracle.rs`의 `Executor` 구현 안에만 있고, 받을 수 있는 것은 `GuardedSelect`(검증된 SELECT)와 `SessionStatement`(고정 문자열 열거형) 두 타입뿐 | 검증을 건너뛰는 코드 경로 |
 | L2 AST 검증 | `sqlparser`로 파싱해 모양을 허용 목록으로 확인: 문장 정확히 1개, 단순 `SELECT`(WITH·UNION·서브쿼리·조인·INTO·FOR UPDATE·잠금 절 없음), 테이블 1개(테이블 함수 없음), 함수는 `COUNT(*)`만, 문자열 리터럴 없음(값은 모두 바인드), 주석 없음(옵티마이저 힌트 차단), 식별자에 `@` 없음(DB 링크). 실패하면 원본에 보내지 않음. Oracle은 준비된 문장의 `statement_type()`이 `Select`인지 실행 전에 한 번 더 확인 | DML·DDL·잠금·자율 트랜잭션 함수·DB 링크 |
 | L3 트랜잭션 규율 | 자동 커밋 꺼짐을 연결 직후 확인, 코드에 커밋 경로 없음(CI grep), 단위(청크, COUNT, 사전 점검 질의)마다 `SET TRANSACTION READ ONLY` → SELECT → ROLLBACK, 오류·조기 종료·패닉·Drop에서도 ROLLBACK | 실수로 남는 변경, 긴 트랜잭션 |
-| L4 세션 설정(Oracle) | 연결 직후 `ALTER SESSION DISABLE PARALLEL QUERY`, `NLS_SORT`·`NLS_COMP = BINARY`, 서버 주 버전 23 이상이면 `ALTER SESSION SET READ_ONLY = TRUE`(23ai 이상의 세션 읽기 전용, DML·DDL은 ORA-28193. 감지 방식은 결정 필요 11번). module·action·client_identifier를 `Dipper`로 설정 | 병렬 실행, 키 순서 불일치, 세션 쓰기 |
-| L5 시간 제한 | 호출별 `set_call_timeout`(기본 300초 제안), 세션 마감 시간(기본 480분 제안, 결정 필요 9번)을 감시 스레드가 `break_execution`(SQLite는 interrupt)으로 끊음 | 멈춘 질의, 끝없는 실행 |
+| L4 세션 설정(Oracle) | 연결 직후 `ALTER SESSION DISABLE PARALLEL QUERY`, `NLS_SORT`·`NLS_COMP = BINARY`, 서버 주 버전 23 이상이면 연결 직후 `ALTER SESSION SET READ_ONLY = TRUE`를 **필수** 적용(설정 실패 시 경고 없이 즉시 중단, 기본·strict 동일. 읽기 전용 세션만 허용. 23ai 이상의 세션 읽기 전용, DML·DDL은 ORA-28193). module·action·client_identifier를 `Dipper`로 설정 | 병렬 실행, 키 순서 불일치, 세션 쓰기 |
+| L5 시간 제한 | 호출별 `set_call_timeout`(기본 300초), 세션 마감 시간(기본 480분)을 감시 스레드가 `break_execution`(SQLite는 interrupt)으로 끊음 | 멈춘 질의, 끝없는 실행 |
 | L6 사전 점검 | 읽기 전 권한·대상 객체·키를 데이터 사전에서 확인(아래 정책표) | 위험한 뷰·시노님, 잘못된 키 |
 | L7 세션 1개 | 프로세스 안에서 원본 세션은 동시에 1개만 | 원본 부하, 잠금 경합 |
 | L8 SQLite | `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, ATTACH 한도 0, `SQLITE_DBCONFIG_DEFENSIVE`, authorizer(SELECT·READ·BEGIN·ROLLBACK·`count` 함수 외 거부) | 쓰기·ATTACH·다른 함수 |
@@ -195,12 +195,12 @@ Dipper가 원본에 보내는 SELECT 외 문장은 아래 허용 목록이 전�
 - Oracle: `ALTER SESSION DISABLE PARALLEL QUERY`, `ALTER SESSION SET NLS_SORT = BINARY`, `ALTER SESSION SET NLS_COMP = BINARY`, `ALTER SESSION SET READ_ONLY = TRUE`, `SET TRANSACTION READ ONLY`, `ROLLBACK`(드라이버의 rollback 호출, 로그에는 이 이름으로 기록)
 - SQLite: `PRAGMA query_only = ON`, `BEGIN`, `ROLLBACK`
 
-**페이징과 일관성**(제안, 결정 필요 8번): 기본은 키 페이징입니다. 청크마다 `WHERE (필터) AND key > :last ORDER BY key FETCH FIRST :n ROWS ONLY`(SQLite는 `LIMIT ?`)를 자기 읽기 전용 트랜잭션 안에서 실행합니다. 키는 dip의 `key`로 지정하거나, 비워 두면 단일 컬럼 기본키(없으면 NOT NULL 단일 컬럼 유니크 제약·인덱스)를 사전 점검에서 찾습니다. SQLite는 `key`가 없으면 `rowid`를 쓰고(`WITHOUT ROWID` 테이블·뷰는 `key` 필요), 지정한 `key`의 유일성은 확인하지 않고 경고만 합니다. 키를 못 찾으면 거부하고, 사용자가 `paging = "snapshot"`을 명시한 경우에만 트랜잭션 하나·커서 하나로 끝까지 읽습니다(일관된 한 시점이지만 대형 테이블에서 ORA-01555 위험, 경고 출력).
+**페이징과 일관성**(2026-11-06 결정): 기본은 키 페이징입니다. 청크마다 `WHERE (필터) AND key > :last ORDER BY key FETCH FIRST :n ROWS ONLY`(SQLite는 `LIMIT ?`)를 자기 읽기 전용 트랜잭션 안에서 실행합니다. 키는 dip의 `key`로 지정하거나, 비워 두면 단일 컬럼 기본키(없으면 NOT NULL 단일 컬럼 유니크 제약·인덱스)를 사전 점검에서 찾습니다. SQLite는 `key`가 없으면 `rowid`를 쓰고(`WITHOUT ROWID` 테이블·뷰는 `key` 필요), 지정한 `key`의 유일성은 확인하지 않고 경고만 합니다. 키를 못 찾으면 거부하고, 사용자가 `paging = "snapshot"`을 명시한 경우에만 트랜잭션 하나·커서 하나로 끝까지 읽습니다(일관된 한 시점이지만 대형 테이블에서 ORA-01555 위험, 경고 출력).
 - 키 페이징의 일관성: 청크 하나는 한 시점으로 일관되지만 청크 사이에는 시점이 다릅니다. 실행 중 바뀐 행은 바뀐 뒤 값으로, 이미 지난 키 범위에 새로 들어온 행은 빠질 수 있고, 키 값이 바뀐 행은 빠질 수 있습니다. 키가 단조 증가하므로 같은 행이 두 번 들어오지는 않습니다. 분석용 복사본으로는 받아들일 수 있는 수준으로 봅니다.
 - `AS OF SCN`(flashback query)은 쓰지 않습니다. 다른 스키마 테이블에는 FLASHBACK 권한이 필요하고, 현재 SCN을 얻으려면 `DBMS_FLASHBACK` 함수나 `V$DATABASE` 권한이 필요하며(함수 허용 목록과 충돌), undo 보존 기간을 넘으면 같은 ORA-01555가 나고, `sqlparser`가 `AS OF` 구문을 파싱하지 못해 L2 검증을 통과시킬 수 없습니다. MVP 이후 필요하면 다시 검토합니다.
 - Oracle 키 페이징은 `FETCH FIRST`가 필요하므로 서버 12c 이상이어야 합니다. 그보다 낮으면 거부합니다(결정 필요 10번).
 
-**사전 점검 정책**(제안, 결정 필요 6·7번) (`dipper check`와 `dipper dip` 모두 데이터를 읽기 전에 실행)
+**사전 점검 정책**(2026-11-06 결정) (`dipper check`와 `dipper dip` 모두 데이터를 읽기 전에 실행)
 
 | 상황 | 기본 | strict |
 |---|---|---|
@@ -211,11 +211,11 @@ Dipper가 원본에 보내는 SELECT 외 문장은 아래 허용 목록이 전�
 | 뷰가 PL/SQL 객체(FUNCTION, PROCEDURE, PACKAGE, TYPE, JAVA, LIBRARY, OPERATOR, INDEXTYPE)에 의존(`SYS.STANDARD` 제외) | 거부 | 거부 |
 | 선택한 컬럼이나 키가 가상 컬럼(함수를 부를 수 있음) | 거부 | 거부 |
 | 데이터 사전을 읽을 수 없어 확인 불가 | 경고 후 진행 | 중단 |
-| 서버 23 이상인데 `READ_ONLY = TRUE` 설정 실패 | 경고 후 진행 | 중단 |
+| 서버 23 이상인데 `READ_ONLY = TRUE` 설정 실패 | 중단(경고 없음) | 중단(경고 없음) |
 | 서버 23 미만(세션 읽기 전용 기능 없음) | 안내만 | 안내만 |
 | 대상 없음, 키가 유니크·NOT NULL이 아님, 키 없음(snapshot 미지정), 서버 12c 미만 | 거부 | 거부 |
 
-strict는 `[safety] strict_readonly = true` 또는 `--strict`로 켭니다(결정 필요 6번). 기본이 경고인 이유: 계정에 쓰기 권한이 있다고 가정하므로 중단을 기본으로 하면 매번 막힙니다. 뷰·시노님 정책은 결정 필요 7번에서 확인합니다.
+strict는 `[safety] strict_readonly = true` 또는 `--strict`로 켭니다(2026-11-06 결정). 기본이 경고인 이유: 계정에 쓰기 권한이 있다고 가정하므로 중단을 기본으로 하면 매번 막힙니다. 다만 서버 주 버전 23 이상에서 `READ_ONLY = TRUE` 설정 실패는 기본·strict 모두 경고 없이 즉시 중단합니다. 뷰·시노님 거부 기준도 2026-11-06 결정입니다.
 
 ### 설정 예시
 ```toml
@@ -322,11 +322,11 @@ count_first = true
   - [ ] `Source` 트레이트 메서드는 `name`, `kind`, `test_connection`, `select`뿐이고 SQL 문자열을 받는 공개 함수가 없다. `#[cfg(test)]` 밖에서 원본에 보내는 SQL은 `SELECT 1 FROM sqlite_master LIMIT 1`, `SELECT 1 FROM DUAL` 두 개뿐이다.
 
 ### PR3a. 원본 읽기 전용 강화와 청크 읽기 (보류)
-- 상태: 2026-11-05 코드 작업 보류. 결정 필요 6~12번 답을 받은 뒤 이 절을 고치고 착수합니다. 계획 변경은 이 문서를 고치는 별도 문서 PR로 먼저 반영하므로, PR3a는 `docs/PLAN.md`를 수정하지 않습니다.
+- 상태: 2026-11-06 결정(6~9·11·12번) 반영. **코드 착수는 이 PLAN 갱신 머지 후**. 계획 변경은 이 문서를 고치는 별도 문서 PR로 먼저 반영하므로, PR3a 코드 PR은 `docs/PLAN.md`를 수정하지 않습니다.
 - 범위: 3절 '원본 읽기 전용 다중 방어'의 L1~L8 전부, 생성 SELECT(키 페이징·snapshot·COUNT), 필터 → WHERE + 바인드, SQLite·Oracle의 `select` 구현(청크 반복자), 사전 점검과 `dipper check`의 경고·거부 출력, `--strict`, `--log-sql`, PR #4 후속 비밀번호 노출 수정, `ci.yml`의 `dumpbin` 검사 강화. DuckDB 적재와 `dipper dip`은 PR3b입니다.
 - 파일: 3절 구조에서 PR3a로 표시된 10개를 추가합니다(`src/source/{session,preflight,watchdog,logging}.rs`, `src/sql/{dialect,filter,build,guard}.rs`, `tests/guard.rs`, `tests/readonly.rs`). 수정은 `Cargo.toml`, `Cargo.lock`, `.github/workflows/ci.yml`, `src/cli.rs`, `src/error.rs`, `src/config/mod.rs`, `src/config/schema.rs`, `src/source/mod.rs`, `src/source/sqlite.rs`, `src/source/oracle.rs`, `src/sql/mod.rs`, `src/commands/check.rs`, `tests/check.rs`, `tests/config.rs`, `tests/common/mod.rs`이고, 필요할 때만 `src/sql/ident.rs`, `tests/cli.rs`도 수정할 수 있습니다.
 - 의존성: `sqlparser` 0.63(`visitor`), `chrono` 0.4(`default-features = false`, `std`), `rusqlite`에 `hooks`·`limits` feature 추가. `duckdb`는 PR3b입니다.
-- 설정 추가: `[safety] strict_readonly`(기본 false), dip의 `key`(식별자, 선택), `paging = "keyset" | "snapshot"`(기본 keyset), 원본의 `max_session_minutes`(기본 480 제안, 0보다 큼), Oracle 원본의 `call_timeout_secs`(기본 300 제안, 0보다 큼)(결정 필요 9번). 전역 옵션 `--strict`, `--log-sql`(원본에 보낸 문장을 stderr에 `sql: <문장>`으로 출력, 값은 바인드라 나오지 않음).
+- 설정 추가: `[safety] strict_readonly`(기본 false), dip의 `key`(식별자, 선택), `paging = "keyset" | "snapshot"`(기본 keyset), 원본의 `max_session_minutes`(기본 480, 0보다 큼), Oracle 원본의 `call_timeout_secs`(기본 300, 0보다 큼). 전역 옵션 `--strict`, `--log-sql`(원본에 보낸 문장을 stderr에 `sql: <문장>`으로 출력, 값은 바인드라 나오지 않음).
 - `dipper check`: 원본마다 세션 설정과 그 원본을 쓰는 dip들의 사전 점검까지 실행합니다. 원본 줄 아래에 `  note: …`, `  warning: …`, `  refused: <dip>: …`를 출력하고, 거부가 있거나 strict에서 경고가 있으면 그 원본은 `FAIL`입니다. 종료코드 규약은 PR2와 같습니다.
 - PR #4 후속(비밀번호 노출): `src/source/oracle.rs`가 오류 문자열에서 비밀번호를 `replace(secret, "***")`로 바꾸는 방식은 비밀번호가 짧거나 오류 문구의 일부와 같으면(예: `ORA`) 문구가 바뀐 위치로 비밀번호를 추정할 수 있습니다. 드라이버 오류 문자열에 비밀번호가 들어 있으면 문자열 전체를 버리고 `ORA-xxxxx`/`DPI-xxxx` 코드와 고정 문구만 남깁니다. 모든 Oracle 오류 경로가 이 함수 하나를 거치고, `Secret::expose`는 `pub(crate)`로 좁힙니다.
 - CI 추가: `dumpbin` 검사를 대소문자 무시로 바꾸고 금지 목록을 `vcruntime`, `api-ms-win-crt`, `ucrtbase`, `msvcp`로 넓힘. `test` job에 커밋 경로 검사와 드라이버 호출 위치 검사 단계 추가.
@@ -342,7 +342,7 @@ count_first = true
   - [ ] `GuardedSelect`는 비공개 필드만 갖고 `GuardedSelect::parse(&str, SqlDialect)`로만 만들 수 있다. 구조체 리터럴과 `From<String>`이 컴파일되지 않음을 `compile_fail` doctest 2개로 확인한다(`cargo test --doc`).
   - [ ] `tests/guard.rs`: 다음이 모두 거부된다 — 문장 2개(`;`), `INSERT`·`UPDATE`·`DELETE`·`MERGE`·`CREATE`·`DROP`·`ALTER`·`TRUNCATE`·`GRANT`·`LOCK TABLE`·`COMMIT`·`BEGIN … END` 블록·`CALL`, `FOR UPDATE`, `WITH`, `UNION`, 서브쿼리(`IN (SELECT …)`, `EXISTS`), 조인, 쉼표로 이은 테이블 2개, `TABLE(f())`, `COUNT(*)` 외 함수(선택 목록·WHERE·ORDER BY 각각), `COUNT(DISTINCT x)`, `COUNT(*) OVER ()`, 문자열 리터럴, 주석(`--`, `/* */`, `/*+ PARALLEL */`), `T@LINK`, `"T"@"LINK"`, `SELECT … INTO`, `AS OF SCN`. 다음은 통과한다 — 이 PR의 SELECT 생성기가 만드는 모든 모양(11개 연산자 각각, 키 페이징 첫 청크·다음 청크, snapshot, `COUNT(*)`, `limit`)과 `SELECT 1 FROM DUAL`, 사전 점검 질의 전부.
   - [ ] `SessionStatement`의 모든 변형이 내는 문자열 집합이 3절 허용 목록(Oracle 6개, SQLite 3개)과 정확히 같다(단위 테스트). 변형은 값을 담지 않는다.
-  - [ ] 가짜 `Executor`로 Oracle 방언 세션 순서를 확인한다(기본 빌드 단위 테스트): 서버 19는 `DISABLE PARALLEL QUERY`, `NLS_SORT`, `NLS_COMP` 뒤 READ_ONLY 없이 안내 1개, 서버 23은 그 뒤 `READ_ONLY = TRUE`. 이후 사전 점검 질의마다, COUNT마다, 청크마다 `SET TRANSACTION READ ONLY` → SELECT 1개 → `ROLLBACK`. 23에서 READ_ONLY가 실패하면 경고 1개, strict면 데이터 SELECT 전에 중단.
+  - [ ] 가짜 `Executor`로 Oracle 방언 세션 순서를 확인한다(기본 빌드 단위 테스트): 서버 19는 `DISABLE PARALLEL QUERY`, `NLS_SORT`, `NLS_COMP` 뒤 READ_ONLY 없이 안내 1개, 서버 23은 그 뒤 `READ_ONLY = TRUE`. 이후 사전 점검 질의마다, COUNT마다, 청크마다 `SET TRANSACTION READ ONLY` → SELECT 1개 → `ROLLBACK`. 23에서 `READ_ONLY = TRUE` 설정이 실패하면 경고 없이 즉시 중단(기본·strict 동일)하고 데이터 SELECT 전에 연결을 닫는다.
   - [ ] ROLLBACK 보장(가짜 Executor): 청크 2에서 오류가 나면 기록의 마지막이 `ROLLBACK`이고 그 뒤 문장이 없다. 청크 1 뒤 반복자를 버리면(Drop) `ROLLBACK`, `catch_unwind`로 잡은 패닉 뒤에도 `ROLLBACK`, 세션을 닫을 때 마지막 `ROLLBACK`. 모든 기록에서 `ROLLBACK` 수 = `SET TRANSACTION READ ONLY` 수 + 1(세션을 닫을 때의 마지막 ROLLBACK)이다.
   - [ ] 자동 커밋: Oracle `Executor`는 연결 직후 `autocommit()`이 true면 오류로 연결을 닫는다(코드 확인 + PR7).
   - [ ] `tests/readonly.rs`(SQLite, `LoggingExecutor`): 테이블 3개(각 1만~3만 행)를 `batch_rows = 1000`으로 읽으면 행 수·값·키 순서가 원본과 같고 모든 청크가 1000행 이하이다. 기록된 문장은 모두 SQLite 허용 목록과 바이트 단위로 같거나 `GuardedSelect::parse`를 통과하며, `BEGIN`과 `ROLLBACK` 수가 같다(SQLite는 열린 트랜잭션이 있을 때만 닫으면서 ROLLBACK). 실행 전후 원본 sha256이 같고 `-journal`·`-wal`·`-shm`이 생기지 않는다. 필터 값 `' OR 1=1 --`는 결과 0행이고 기록된 SQL에 그 값이 없다. `limit`이 지켜진다. `count_first`의 `SELECT COUNT(*)`도 자기 트랜잭션 안에서 실행된다.
@@ -359,7 +359,7 @@ count_first = true
   - [ ] oracle 빌드: Instant Client가 없는 CI에서 PR2의 `DPI-1047` 안내 테스트가 그대로 통과한다.
 
 ### PR3b. DuckDB 적재와 `dipper dip` (보류)
-- 상태: 2026-11-05 코드 작업 보류. PR3a가 머지된 뒤 세부 내용을 확정합니다. 범위: DuckDB 열기(`memory_limit`, `temp_directory`), Appender 적재, 스테이징 교체, `_dipper_runs`, 원본 청크 → 적재 루프, 진행률, 여러 dip 실행과 요약표, `--fail-fast`, `dipper dip [<name>...]`. 원본 읽기는 PR3a의 `Source::select`만 씁니다.
+- 상태: 코드 작업 보류. PR3a가 머지된 뒤 세부 내용을 확정합니다. 범위: DuckDB 열기(`memory_limit`, `temp_directory`), Appender 적재, 스테이징 교체, `_dipper_runs`, 원본 청크 → 적재 루프, 진행률, 여러 dip 실행과 요약표, `--fail-fast`, `dipper dip [<name>...]`. 원본 읽기는 PR3a의 `Source::select`만 씁니다.
 - 파일: 3절 구조에서 PR3b로 표시된 7개(`src/store/{mod,load,meta}.rs`, `src/pipeline/{mod,progress}.rs`, `src/commands/dip.rs`, `tests/dip.rs`) 추가, 수정은 `Cargo.toml`, `Cargo.lock`, `src/lib.rs`, `src/cli.rs`, `src/commands/mod.rs`, `src/error.rs`, `tests/cli.rs`, 필요하면 `tests/common/mod.rs`.
 - 의존성: `duckdb`(bundled), `indicatif`, `comfy-table`. 버전은 PR3b 착수 때 crates.io로 다시 확인합니다.
 - 완료 기준
@@ -400,7 +400,7 @@ count_first = true
 ### PR6. 예제, 문서, Windows 배포
 - `examples/`에 샘플 SQLite DB 생성 방법과 예제 `dipper.toml`
 - README에 Quickstart(Windows PowerShell 기준 명령), 설치 방법 추가
-- `docs/ORACLE_SETUP.md`: Windows용 Oracle Instant Client 설치 안내(Basic 또는 Basic Light 패키지 zip 받기, 예: `C:\oracle\instantclient_XX_X`에 풀기, 그 폴더를 사용자 `PATH`에 추가, 필요한 경우 해당 버전이 요구하는 VC++ 재배포 패키지 설치, `dipper check`로 확인). 회사 PC에서 설치 가능한지는 아직 확인되지 않았음을 문서에 명시하고, 관리자 권한 없이 사용자 폴더에 풀어 쓰는 방법을 함께 적습니다.
+- `docs/ORACLE_SETUP.md`: Windows용 Oracle Instant Client 설치 안내(Basic 또는 Basic Light 패키지 zip 받기, 사용자 폴더 예: `C:\Users\<사용자>\oracle\instantclient_23_0`에 풀기, 그 폴더를 사용자 `PATH`에 추가, 필요한 경우 해당 버전이 요구하는 VC++ 재배포 패키지 설치, `dipper check`로 확인). 회사 PC에서는 관리자 권한 없이 사용자 폴더에 풀어 쓰는 방식이 가능함이 확인됨(5절).
 - 릴리스 워크플로: `v*` 태그를 푸시하면 Windows에서 `--release --features oracle`로 빌드한 `dipper.exe`를 zip으로 묶어 GitHub Release에 올림
 - 완료 기준
   - [ ] 깨끗한 Linux·Windows 환경에서 Quickstart 명령을 순서대로 실행하면 에러 없이 끝까지 동작하고, CI 스모크 테스트가 같은 명령을 실행한다.
@@ -415,7 +415,7 @@ count_first = true
   - 문장: `--log-sql`에 3절 허용 목록과 검증된 SELECT만 있음, 실행 뒤 `V$TRANSACTION`에 Dipper 세션의 트랜잭션이 남지 않음
   - 세션 표시: 실행 중 `V$SESSION`의 `MODULE`, `ACTION`, `CLIENT_IDENTIFIER`에 `Dipper`가 보임
   - 병렬: `DEGREE`가 1보다 큰 테이블을 dip하는 동안 `V$SESSION.PQ_STATUS`가 `DISABLED`이고 `V$PX_SESSION`에 Dipper 세션이 없음
-  - 세션 읽기 전용(23 이상): `dipper check`에 안내·경고 없이 READ_ONLY가 적용됨. 별도 도구에서 같은 문장(`ALTER SESSION SET READ_ONLY = TRUE`) 뒤 INSERT가 ORA-28193으로 막힘, 같은 상태에서 자율 트랜잭션 함수를 SELECT로 부르면 막히는지 기록
+  - 세션 읽기 전용(23 이상): 연결 직후 READ_ONLY=TRUE가 필수이며 `dipper check`에 경고 없이 적용됨. 설정 실패 시 기본·strict 모두 즉시 중단인지 확인. 별도 도구에서 같은 문장(`ALTER SESSION SET READ_ONLY = TRUE`) 뒤 INSERT가 ORA-28193으로 막힘, 같은 상태에서 자율 트랜잭션 함수를 SELECT로 부르면 막히는지 기록
   - 근거 재현(테스트 스키마): `SET TRANSACTION READ ONLY` 안에서 자율 트랜잭션 함수의 INSERT가 남는 것과 `LOCK TABLE`이 허용되는 것을 기록(L2·L1이 필요한 이유)
   - 사전 점검: 쓰기 권한 경고가 보임, `--strict`면 중단, 함수를 부르는 테스트 뷰는 거부, DB 링크 시노님은 거부, 일반 뷰는 경고, 가상 컬럼은 거부, 키 자동 탐지 결과
   - 시간 제한: `call_timeout_secs = 1`로 느린 질의가 끊기고 ROLLBACK 뒤 깔끔히 종료, 작은 `max_session_minutes`로 `break_execution`이 실행 중 질의를 끊음(ORA-01013)
@@ -435,22 +435,24 @@ count_first = true
 | 웹 서버/WAS | MVP에서 사용 안 함. 단일 CLI exe 유지, 나중에 `dipper serve`를 붙일 수 있게 lib/main 분리 유지 |
 | 폴더·파일 구조 | 3절 '폴더·파일 구조'대로 확정 |
 | 설정 파일 형식 | 설정 파일 형식은 TOML(`dipper.toml`)로 확정 (2026-11-05, 민호님 승인) |
-| 원본 읽기 전용 | 어떤 경우에도 원본은 읽기 전용. SQL 문자열 검사만으로는 부족하므로 코드 쪽에 여러 층의 방어를 둔다. 원본 계정에 쓰기 권한이 있다고 가정하고, DB 쪽 설정(DBA 권한, 프로파일, Resource Manager, 감사, 복제본)은 범위 밖 (2026-11-05, 민호님 승인). 구체 방식은 3절 계획(제안)과 6절 결정 필요 6~12번 |
+| 원본 읽기 전용 | 어떤 경우에도 원본은 읽기 전용. SQL 문자열 검사만으로는 부족하므로 코드 쪽에 여러 층의 방어를 둔다. 원본 계정에 쓰기 권한이 있다고 가정하고, DB 쪽 설정(DBA 권한, 프로파일, Resource Manager, 감사, 복제본)은 범위 밖 (2026-11-05, 민호님 승인). 구체 방식은 3절과 아래 2026-11-06 결정 |
+| Oracle Instant Client 설치 | 가능(사용자 폴더). Instant Client Basic Lite를 `C:\Users\<사용자>\oracle\instantclient_23_0`에 풀어 PATH에 넣고 `--features oracle` 빌드 후 `dipper check` → `company (oracle): OK` (2026-11-06, 민호님 확인) |
+| 사전 점검 기본 동작 | 쓰기 권한(시스템·객체 권한, 테이블 소유)·일반 뷰·확인 불가는 기본 '경고 후 진행', `--strict`(또는 `[safety] strict_readonly = true`)면 중단 (2026-11-06, 민호님 승인. 계정에 쓰기 권한이 있다고 가정하므로 중단을 기본으로 하면 매번 막힘) |
+| 뷰·시노님 거부 기준 | DB 링크가 걸린 시노님·뷰, PL/SQL 객체(`SYS.STANDARD` 제외)에 의존하는 뷰, 가상 컬럼은 항상 거부(우회 옵션 없음), 일반 뷰는 경고, 시노님은 최대 5단계까지 해석 (2026-11-06, 민호님 승인) |
+| 페이징과 일관성 | 기본은 키 페이징(청크마다 짧은 읽기 전용 트랜잭션). 키는 지정하거나 기본키·NOT NULL 유니크 컬럼에서 자동 탐지, 못 찾으면 거부. `paging = "snapshot"`을 명시한 경우에만 한 트랜잭션으로 읽음(ORA-01555 위험, 경고 출력). `AS OF SCN`은 쓰지 않음 (2026-11-06, 민호님 승인) |
+| 시간 제한 기본값 | 호출당 300초(`call_timeout_secs`), 세션 전체 480분(`max_session_minutes`). PR7에서 필요 시 조정 (2026-11-06, 민호님 승인) |
+| 23ai 세션 읽기 전용 | 서버 주 버전 23 이상이면 연결 직후 `ALTER SESSION SET READ_ONLY = TRUE` **필수**. 설정 실패 시 경고 없이 즉시 중단(기본·strict 동일). 읽기 전용 세션만 허용. 23 미만이면 안내만(세션 읽기 전용 기능 없음) (2026-11-06, 민호님 승인. 제안과 다름) |
+| 정밀도 없는 Oracle `NUMBER` 매핑 | VARCHAR(손실 없는 10진 문자열) (2026-11-06, 민호님 승인) |
 
 ## 6. 결정 필요
 
-1. **Oracle Instant Client 설치 가능 여부(미확인)**: 회사 Windows PC에 Instant Client를 설치하거나 사용자 폴더에 풀어 `PATH`에 추가할 수 있나요? 안 되면 Oracle 연결 방식을 다시 검토해야 합니다.
+(1번·6~9번·11번·12번은 2026-11-06 결정으로 5절로 옮김.)
+
 2. **Oracle 실연결 확인(PR7)**을 민호님 PC에서 직접 해 주실 수 있나요? 회사 DB 접속 정보는 저장소나 봇에 저장하지 않는 것을 전제로 합니다.
 3. **문서의 DB 이름 표기**: 소개 부분은 계속 "multiple databases"로 두고, 설치·Quickstart에서만 DuckDB와 Oracle 같은 실제 이름을 써도 될까요? 제안: 그렇게 함.
 4. **사용 방식**: 필터를 설정 파일에 적는 방식이면 "SQL 몰라도 쓴다"는 목표에 충분한가요, 아니면 MVP에 테이블·컬럼을 대화형으로 고르는 기능이 필요한가요? 제안: MVP는 설정 파일 방식.
 5. **회사 PC 자원**: 기본 메모리 상한 2GB와, 수십 GB 이상일 수 있는 DuckDB 파일·임시 파일을 둘 디스크 공간이 괜찮나요? 대략적인 PC 메모리와 남은 디스크 용량을 알려 주시면 기본값을 맞춥니다.
-6. **사전 점검 기본 동작**: 쓰기 권한(시스템·객체 권한, 테이블 소유)·일반 뷰·확인 불가는 기본 '경고 후 진행', `--strict`(또는 `[safety] strict_readonly = true`)면 중단. 중단을 기본으로 할지 정해 주세요. 제안: 경고 후 진행(계정에 쓰기 권한이 있다고 가정하므로 중단을 기본으로 하면 매번 막힘).
-7. **뷰·시노님 거부 기준**: DB 링크가 걸린 시노님·뷰, PL/SQL 객체(`SYS.STANDARD` 제외)에 의존하는 뷰, 가상 컬럼은 항상 거부(우회 옵션 없음), 일반 뷰는 경고, 시노님은 최대 5단계까지 해석. 제안: 그렇게 함.
-8. **페이징과 일관성**: 기본은 키 페이징(청크마다 짧은 읽기 전용 트랜잭션, 청크 사이 시점이 달라 실행 중 바뀐 행은 빠질 수 있음). 키는 지정하거나 기본키·NOT NULL 유니크 컬럼에서 자동 탐지, 못 찾으면 거부하고 `paging = "snapshot"`을 명시한 경우만 한 트랜잭션으로 읽음(ORA-01555 위험). `AS OF SCN`은 쓰지 않음. 제안: 그렇게 함.
-9. **시간 제한 기본값**: 호출당 300초, 세션 전체 480분. 제안: 그대로 두고 PR7에서 조정.
-10. **회사 Oracle 서버 버전**: 키 페이징에는 12c 이상이 필요합니다(`FETCH FIRST`). 버전을 알려 주시면 기본값을 맞춥니다.
-11. **23ai 세션 읽기 전용 감지**: `server_version()`의 주 버전이 23 이상이면 연결 직후 `ALTER SESSION SET READ_ONLY = TRUE`를 시도하고, 실패하면 경고(strict면 중단), 23 미만이면 안내만. 제안: 그렇게 함.
-12. **정밀도 없는 Oracle `NUMBER` 매핑**: 손실 없는 VARCHAR(10진 문자열)로 받을까요, DOUBLE로 받을까요(큰 ID는 정밀도 손실)? 제안: VARCHAR.
+10. **회사 Oracle 서버 버전**(숫자 미확인): 회사 PC에서 Instant Client·`dipper check` OK(회사 DB). 키 페이징에는 12c 이상이 필요하므로(`FETCH FIRST`) 12c 미만이면 거부 규칙은 유지. 실제 버전 숫자는 PR7에서 확인합니다.
 
 ## 7. MVP 이후: 시계열 갱신 설계 초안
 
