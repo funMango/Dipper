@@ -402,5 +402,28 @@ fn check_ident(ident: &Ident) -> Result<(), GuardError> {
     if ident.value.contains('@') {
         return Err(GuardError("database links are not allowed".to_string()));
     }
+    if ident.value.eq_ignore_ascii_case("nextval") || ident.value.eq_ignore_ascii_case("currval") {
+        return Err(GuardError(
+            "sequence references are not allowed".to_string(),
+        ));
+    }
+    // Unquoted niladic calls (`SYSDATE`, `CURRENT_TIMESTAMP`) are functions, not columns.
+    if ident.quote_style.is_none()
+        && matches!(
+            ident.value.to_ascii_uppercase().as_str(),
+            "SYSDATE"
+                | "CURRENT_DATE"
+                | "CURRENT_TIMESTAMP"
+                | "CURRENT_TIME"
+                | "LOCALTIMESTAMP"
+                | "LOCALTIME"
+                | "USER"
+                | "UID"
+                | "ROWNUM"
+                | "LEVEL"
+        )
+    {
+        return Err(GuardError("function calls are not allowed".to_string()));
+    }
     Ok(())
 }

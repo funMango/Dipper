@@ -316,6 +316,7 @@ pub(crate) fn run_oracle(
                 format!("target is a view ({})", target.name),
             ));
         }
+        check_view_virtual_columns(dict, &target, spec, &mut findings, dip);
     } else {
         check_columns(dict, &target, spec, &mut findings, dip);
     }
@@ -587,6 +588,51 @@ fn check_columns(
                 dip,
                 format!("column {column} not found"),
             ));
+            continue;
+        };
+        if text_at(row, 1).as_deref() == Some("YES") {
+            findings.push(finding(
+                Level::Refuse,
+                "virtual-column",
+                dip,
+                format!("column {column} is virtual"),
+            ));
+        }
+    }
+}
+
+fn check_view_virtual_columns(
+    dict: &dyn Dictionary,
+    target: &ObjectRef,
+    spec: &SelectSpec,
+    findings: &mut Vec<Finding>,
+    dip: &str,
+) {
+    let rows = match dict.rows(
+        DictQuery::AllTabCols,
+        &[
+            Value::Text(target.owner.clone()),
+            Value::Text(target.name.clone()),
+        ],
+    ) {
+        Ok(rows) => rows,
+        Err(err) => {
+            unverifiable(findings, dip, &err);
+            return;
+        }
+    };
+    let mut needed = spec.columns.clone();
+    if let Some(key) = &spec.key {
+        needed.push(key.clone());
+    }
+    for filter in &spec.filters {
+        needed.push(filter.column.clone());
+    }
+    for column in needed {
+        let Some(row) = rows
+            .iter()
+            .find(|row| text_at(row, 0).as_deref() == Some(column.as_str()))
+        else {
             continue;
         };
         if text_at(row, 1).as_deref() == Some("YES") {
@@ -1186,8 +1232,39 @@ mod tests {
                 && finding.message.contains("CREATE TABLE")
                 && finding.message.contains("INSERT ANY TABLE")
         }));
-        assert!(has(&report, "write-object-privilege", Level::Warn));
         assert!(has(&report, "dba-role", Level::Warn));
+        assert!(!blocks(&report, false));
+        assert!(blocks(&report, true));
+
+        let mut direct = owned_orders();
+        add(
+            &mut direct,
+            DictQuery::TabPrivsRecd,
+            &["SALES", "ORDERS"],
+            cells(&["INSERT"]),
+        );
+        let report = run(&direct, 19, &spec("SALES.ORDERS", Paging::Keyset, None));
+        assert!(has(&report, "write-object-privilege", Level::Warn));
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("INSERT")));
+        assert!(!blocks(&report, false));
+        assert!(blocks(&report, true));
+
+        let mut role = owned_orders();
+        add(
+            &mut role,
+            DictQuery::RoleTabPrivs,
+            &["SALES", "ORDERS"],
+            cells(&["APP_ROLE", "UPDATE"]),
+        );
+        let report = run(&role, 19, &spec("SALES.ORDERS", Paging::Keyset, None));
+        assert!(has(&report, "write-object-privilege", Level::Warn));
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("UPDATE")));
         assert!(!blocks(&report, false));
         assert!(blocks(&report, true));
 
@@ -1274,6 +1351,8 @@ mod tests {
             .findings
             .iter()
             .any(|finding| { finding.message.contains("FUNCTION SALES.F_AUDIT") }));
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
 
         let mut synonym = owned_orders();
         add(
@@ -1298,6 +1377,8 @@ mod tests {
             report.key.as_ref().map(|key| key.source),
             Some(KeySource::PrimaryKey)
         );
+        assert!(!blocks(&report, false));
+        assert!(!blocks(&report, true));
 
         let mut remote = synonym.clone();
         remote.rows.retain(|(query, binds, _)| {
@@ -1317,6 +1398,7 @@ mod tests {
         let report = run(&remote, 19, &spec("ORDERS", Paging::Keyset, None));
         assert!(has(&report, "synonym-db-link", Level::Refuse));
         assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
 
         let mut chain = Cat {
             rows: Vec::new(),
@@ -1350,6 +1432,8 @@ mod tests {
             "{:?}",
             report.findings
         );
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
 
         let mut virtual_col = owned_orders();
         virtual_col
@@ -1373,6 +1457,24 @@ mod tests {
             &spec("SALES.ORDERS", Paging::Keyset, None),
         );
         assert!(has(&report, "virtual-column", Level::Refuse));
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
+
+        let mut view_virtual = view.clone();
+        add(
+            &mut view_virtual,
+            DictQuery::AllTabCols,
+            &["SALES", "V_ORDERS"],
+            cells(&["ORDER_ID", "YES", "N"]),
+        );
+        let report = run(
+            &view_virtual,
+            19,
+            &spec("SALES.V_ORDERS", Paging::Keyset, Some("ORDER_ID")),
+        );
+        assert!(has(&report, "virtual-column", Level::Refuse));
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
     }
 
     #[test]
@@ -1400,6 +1502,8 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.message.contains("snapshot")));
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
 
         let mut nullable = owned_orders();
         nullable.rows.retain(|(query, _, _)| {
@@ -1435,6 +1539,8 @@ mod tests {
             &spec("SALES.ORDERS", Paging::Keyset, Some("STATUS")),
         );
         assert!(has(&report, "key-nullable", Level::Refuse));
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
 
         let mut duplicate = owned_orders();
         add(
@@ -1449,6 +1555,8 @@ mod tests {
             &spec("SALES.ORDERS", Paging::Keyset, Some("CODE")),
         );
         assert!(has(&report, "key-not-unique", Level::Refuse));
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
 
         let mut unique = owned_orders();
         unique.rows.retain(|(query, _, _)| {
@@ -1484,6 +1592,7 @@ mod tests {
             Some(KeySource::UniqueNotNull)
         );
         assert!(!blocks(&report, false));
+        assert!(!blocks(&report, true));
 
         let old = run(
             &owned_orders(),
@@ -1492,6 +1601,7 @@ mod tests {
         );
         assert!(has(&old, "server-too-old", Level::Refuse));
         assert!(blocks(&old, false));
+        assert!(blocks(&old, true));
         let snap = run(
             &owned_orders(),
             11,

@@ -151,7 +151,7 @@ impl Executor for OracleExec {
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
         let size = u32::try_from(fetch_rows.max(1)).unwrap_or(u32::MAX);
-        let mut statement = self
+        let statement = self
             .conn
             .statement(query.sql())
             .fetch_array_size(size)
@@ -167,7 +167,11 @@ impl Executor for OracleExec {
         let owned = bind_values(binds);
         let params: Vec<&dyn oracle::sql_type::ToSql> =
             owned.iter().map(|value| value.as_ref()).collect();
-        let rows = statement.query(&params).map_err(|err| self.fail(err))?;
+        let statement = Box::new(statement);
+        let statement_ptr =
+            statement.as_ref() as *const oracle::Statement as *mut oracle::Statement;
+        // SAFETY: `statement` stays on the heap for as long as `rows` borrows it.
+        let rows = unsafe { (*statement_ptr).query(&params) }.map_err(|err| self.fail(err))?;
         let columns: Vec<String> = rows
             .column_info()
             .iter()
@@ -178,18 +182,13 @@ impl Executor for OracleExec {
             .iter()
             .map(|info| info.oracle_type().clone())
             .collect();
-        let mut stored = Vec::new();
-        for row in rows {
-            let row = row.map_err(|err| self.fail(err))?;
-            let mut values = Vec::with_capacity(columns.len());
-            for (index, oracle_type) in types.iter().enumerate() {
-                values.push(read_cell(&row, index, oracle_type).map_err(|err| self.fail(err))?);
-            }
-            stored.push(values);
-        }
-        Ok(Box::new(VecCursor {
+        Ok(Box::new(OracleStream {
+            _binds: owned,
+            statement,
+            rows: Box::into_raw(Box::new(rows)).cast(),
             columns,
-            rows: stored.into_iter(),
+            types,
+            name: self.name.clone(),
         }))
     }
 
@@ -211,9 +210,9 @@ fn bind_values(binds: &[Value]) -> Vec<Box<dyn oracle::sql_type::ToSql>> {
                 Value::Int(value) => Box::new(*value),
                 Value::Float(value) => Box::new(*value),
                 Value::Text(value) => Box::new(value.clone()),
-                Value::Date(value) => Box::new(value.format("%Y-%m-%d").to_string()),
+                Value::Date(value) => Box::new(format!("{}", value.format("%Y-%m-%d"))),
                 Value::Timestamp(value) => {
-                    Box::new(value.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+                    Box::new(format!("{}", value.format("%Y-%m-%d %H:%M:%S%.f")))
                 }
             }
         })
@@ -263,18 +262,48 @@ fn parse_oracle_timestamp(text: &str) -> Value {
     Value::Text(text.to_owned())
 }
 
-struct VecCursor {
+struct OracleStream {
+    _binds: Vec<Box<dyn oracle::sql_type::ToSql>>,
+    /// Keeps the statement alive for `rows`.
+    #[allow(dead_code)]
+    statement: Box<oracle::Statement>,
+    rows: *mut oracle::ResultSet<'static, oracle::Row>,
     columns: Vec<String>,
-    rows: std::vec::IntoIter<Vec<Value>>,
+    types: Vec<oracle::sql_type::OracleType>,
+    name: String,
 }
 
-impl RowCursor for VecCursor {
+impl Drop for OracleStream {
+    fn drop(&mut self) {
+        if !self.rows.is_null() {
+            // SAFETY: created with `Box::into_raw`; the statement it borrows is still alive.
+            unsafe { drop(Box::from_raw(self.rows)) };
+            self.rows = std::ptr::null_mut();
+        }
+    }
+}
+
+impl RowCursor for OracleStream {
     fn columns(&self) -> &[String] {
         &self.columns
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Value>>, DipperError> {
-        Ok(self.rows.next())
+        let rows = unsafe { &mut *self.rows };
+        match rows.next() {
+            Some(Ok(row)) => {
+                let mut values = Vec::with_capacity(self.columns.len());
+                for (index, oracle_type) in self.types.iter().enumerate() {
+                    values.push(
+                        read_cell(&row, index, oracle_type)
+                            .map_err(|err| oracle_error(&self.name, &err, None))?,
+                    );
+                }
+                Ok(Some(values))
+            }
+            Some(Err(err)) => Err(oracle_error(&self.name, &err, None)),
+            None => Ok(None),
+        }
     }
 }
 

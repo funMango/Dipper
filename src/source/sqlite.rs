@@ -150,22 +150,23 @@ impl Executor for SqliteExec {
         binds: &[Value],
         _fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
-        let mut statement = self
-            .conn
-            .prepare(query.sql())
-            .map_err(|err| self.fail(err))?;
+        let mut statement = Box::new(
+            self.conn
+                .prepare(query.sql())
+                .map_err(|err| self.fail(err))?,
+        );
         let columns: Vec<String> = statement.column_names().map(str::to_string).collect();
         let params: Vec<Bound> = binds.iter().cloned().map(Bound).collect();
-        let mut rows = statement
-            .query(rusqlite::params_from_iter(params.iter()))
+        let statement_ptr = statement.as_mut() as *mut rusqlite::Statement<'_>;
+        // SAFETY: `statement` is heap-allocated and is dropped only after `rows`.
+        // `query` binds `params` immediately, so `rows` borrows only the statement.
+        let rows = unsafe { (*statement_ptr).query(rusqlite::params_from_iter(params.iter())) }
             .map_err(|err| self.fail(err))?;
-        let mut stored = Vec::new();
-        while let Some(row) = rows.next().map_err(|err| self.fail(err))? {
-            stored.push(read_row(row, columns.len()).map_err(|err| self.fail(err))?);
-        }
-        Ok(Box::new(VecCursor {
+        Ok(Box::new(SqliteStream {
+            statement,
+            rows: Box::into_raw(Box::new(rows)).cast(),
             columns,
-            rows: stored.into_iter(),
+            name: self.name.clone(),
         }))
     }
 
@@ -187,16 +188,6 @@ fn authorize(ctx: AuthContext<'_>) -> Authorization {
     match ctx.action {
         AuthAction::Select => Authorization::Allow,
         AuthAction::Read { .. } => Authorization::Allow,
-        // DML and DDL still fail because the file is opened read-only and
-        // `query_only` is on. Allowing them here lets SQLite report
-        // SQLITE_READONLY instead of hiding that result behind the authorizer.
-        AuthAction::Insert { .. }
-        | AuthAction::Update { .. }
-        | AuthAction::Delete { .. }
-        | AuthAction::CreateTable { .. }
-        | AuthAction::CreateIndex { .. }
-        | AuthAction::DropTable { .. }
-        | AuthAction::DropIndex { .. } => Authorization::Allow,
         AuthAction::Transaction {
             operation: TransactionOperation::Begin | TransactionOperation::Rollback,
         } => Authorization::Allow,
@@ -215,18 +206,50 @@ fn authorize(ctx: AuthContext<'_>) -> Authorization {
     }
 }
 
-struct VecCursor {
+/// One open statement. Rows are stepped one at a time, not copied up front.
+struct SqliteStream<'conn> {
+    /// Keeps the prepared statement alive for `rows`.
+    #[allow(dead_code)]
+    statement: Box<rusqlite::Statement<'conn>>,
+    rows: *mut rusqlite::Rows<'static>,
     columns: Vec<String>,
-    rows: std::vec::IntoIter<Vec<Value>>,
+    name: String,
 }
 
-impl RowCursor for VecCursor {
+impl Drop for SqliteStream<'_> {
+    fn drop(&mut self) {
+        if !self.rows.is_null() {
+            // SAFETY: `rows` was created from `Box::into_raw` and borrows `statement`,
+            // which is still alive. Drop the row stream before the statement.
+            unsafe { drop(Box::from_raw(self.rows)) };
+            self.rows = std::ptr::null_mut();
+        }
+    }
+}
+
+impl RowCursor for SqliteStream<'_> {
     fn columns(&self) -> &[String] {
         &self.columns
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Value>>, DipperError> {
-        Ok(self.rows.next())
+        // SAFETY: `rows` is non-null until Drop and exclusively borrowed here.
+        let rows = unsafe { &mut *self.rows };
+        let width = self.columns.len();
+        let name = self.name.clone();
+        match rows.next() {
+            Ok(Some(row)) => read_row(row, width)
+                .map(Some)
+                .map_err(|err| DipperError::Source {
+                    source_name: name,
+                    message: err.to_string(),
+                }),
+            Ok(None) => Ok(None),
+            Err(err) => Err(DipperError::Source {
+                source_name: name,
+                message: err.to_string(),
+            }),
+        }
     }
 }
 
@@ -407,12 +430,22 @@ mod tests {
             .connection()
             .execute("CREATE TABLE u (id INTEGER)", [])
             .unwrap_err();
-        assert_eq!(create_err.sqlite_error_code(), Some(ErrorCode::ReadOnly));
+        assert_write_blocked(create_err);
         let insert_err = src
             .connection()
             .execute("INSERT INTO ORDERS (ORDER_ID, STATUS) VALUES (2, 'NO')", [])
             .unwrap_err();
-        assert_eq!(insert_err.sqlite_error_code(), Some(ErrorCode::ReadOnly));
+        assert_write_blocked(insert_err);
+    }
+
+    fn assert_write_blocked(err: rusqlite::Error) {
+        assert!(
+            matches!(
+                err.sqlite_error_code(),
+                Some(ErrorCode::ReadOnly | ErrorCode::AuthorizationForStatementDenied)
+            ),
+            "write should fail read-only or auth-denied, got {err:?}"
+        );
     }
 
     #[test]

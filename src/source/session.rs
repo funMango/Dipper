@@ -613,13 +613,35 @@ mod tests {
         }
     }
 
-    struct FakeCursor {
+    struct StreamCursor {
         columns: Vec<String>,
-        rows: std::vec::IntoIter<Vec<Value>>,
+        buffer: std::collections::VecDeque<Vec<Value>>,
+        next_index: usize,
+        total: usize,
+        fetch_rows: usize,
+        peak: Arc<AtomicUsize>,
         panic_on_row: bool,
     }
 
-    impl RowCursor for FakeCursor {
+    impl StreamCursor {
+        fn fill(&mut self) {
+            if !self.buffer.is_empty() {
+                return;
+            }
+            while self.buffer.len() < self.fetch_rows && self.next_index < self.total {
+                let index = self.next_index;
+                self.next_index += 1;
+                self.buffer.push_back(vec![
+                    Value::Int(index as i64 + 1),
+                    Value::Text("x".to_string()),
+                ]);
+            }
+            let len = self.buffer.len();
+            self.peak.fetch_max(len, Ordering::SeqCst);
+        }
+    }
+
+    impl RowCursor for StreamCursor {
         fn columns(&self) -> &[String] {
             &self.columns
         }
@@ -628,7 +650,10 @@ mod tests {
             if self.panic_on_row {
                 panic!("cursor panic");
             }
-            Ok(self.rows.next())
+            if self.buffer.is_empty() {
+                self.fill();
+            }
+            Ok(self.buffer.pop_front())
         }
     }
 
@@ -643,6 +668,7 @@ mod tests {
         panic_on_row: bool,
         rows_per_cursor: usize,
         closed: Arc<AtomicBool>,
+        peak_buffer: Arc<AtomicUsize>,
     }
 
     impl FakeExec {
@@ -658,6 +684,7 @@ mod tests {
                 panic_on_row: false,
                 rows_per_cursor: 1,
                 closed: Arc::new(AtomicBool::new(false)),
+                peak_buffer: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -698,7 +725,7 @@ mod tests {
             &'a self,
             query: &GuardedSelect,
             _binds: &[Value],
-            _fetch_rows: usize,
+            fetch_rows: usize,
         ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
             let nth = self.selects.fetch_add(1, Ordering::SeqCst) + 1;
             self.log
@@ -711,13 +738,13 @@ mod tests {
                     message: "select failed".to_string(),
                 });
             }
-            let columns = vec!["K".to_string(), "A".to_string()];
-            let rows = (0..self.rows_per_cursor)
-                .map(|index| vec![Value::Int(index as i64 + 1), Value::Text("x".to_string())])
-                .collect::<Vec<_>>();
-            Ok(Box::new(FakeCursor {
-                columns,
-                rows: rows.into_iter(),
+            Ok(Box::new(StreamCursor {
+                columns: vec!["K".to_string(), "A".to_string()],
+                buffer: std::collections::VecDeque::new(),
+                next_index: 0,
+                total: self.rows_per_cursor,
+                fetch_rows: fetch_rows.max(1),
+                peak: Arc::clone(&self.peak_buffer),
                 panic_on_row: self.panic_on_row,
             }))
         }
@@ -906,34 +933,103 @@ mod tests {
         )
         .unwrap();
         session.read_all(&count, &[]).unwrap();
-        let mut iter = session.chunks(keyset_plan(3, 1));
+        let plan = keyset_plan(3, 1);
+        let mut iter = session.chunks(plan.clone());
         for _ in 0..3 {
             assert!(iter.next().unwrap().is_ok());
         }
         assert!(iter.next().is_none());
         drop(iter);
-        let before_close = log.lock().unwrap().clone();
-        let set_txn = before_close
-            .iter()
-            .filter(|sql| *sql == "SET TRANSACTION READ ONLY")
-            .count();
-        let selects = before_close
-            .iter()
-            .filter(|sql| sql.starts_with("SELECT"))
-            .count();
-        let rollbacks = before_close.iter().filter(|sql| *sql == "ROLLBACK").count();
-        assert_eq!(set_txn, 5, "{before_close:?}");
-        assert_eq!(selects, 5, "{before_close:?}");
-        assert_eq!(rollbacks, set_txn, "{before_close:?}");
+        let next_sql = plan.next.unwrap().sql().to_string();
+        let mut expected = vec![
+            "ALTER SESSION DISABLE PARALLEL QUERY".to_string(),
+            "ALTER SESSION SET NLS_SORT = BINARY".to_string(),
+            "ALTER SESSION SET NLS_COMP = BINARY".to_string(),
+            "ALTER SESSION SET READ_ONLY = TRUE".to_string(),
+            "SET TRANSACTION READ ONLY".to_string(),
+            probe.sql().to_string(),
+            "ROLLBACK".to_string(),
+            "SET TRANSACTION READ ONLY".to_string(),
+            count.sql().to_string(),
+            "ROLLBACK".to_string(),
+            "SET TRANSACTION READ ONLY".to_string(),
+            plan.first.sql().to_string(),
+            "ROLLBACK".to_string(),
+            "SET TRANSACTION READ ONLY".to_string(),
+            next_sql.clone(),
+            "ROLLBACK".to_string(),
+            "SET TRANSACTION READ ONLY".to_string(),
+            next_sql,
+            "ROLLBACK".to_string(),
+        ];
+        assert_eq!(log.lock().unwrap().clone(), expected);
         drop(session);
-        let after = log.lock().unwrap().clone();
-        let rollbacks = after.iter().filter(|sql| *sql == "ROLLBACK").count();
-        let set_txn = after
-            .iter()
-            .filter(|sql| *sql == "SET TRANSACTION READ ONLY")
-            .count();
-        assert_eq!(rollbacks, set_txn + 1, "{after:?}");
-        assert_eq!(after.last().map(String::as_str), Some("ROLLBACK"));
+        expected.push("ROLLBACK".to_string());
+        assert_eq!(log.lock().unwrap().clone(), expected);
+    }
+
+    #[test]
+    fn snapshot_and_dictionary_reads_log_one_statement_per_transaction() {
+        let _lock = test_lock();
+        let mut exec = FakeExec::oracle(23);
+        exec.rows_per_cursor = 2;
+        let log = Arc::clone(&exec.log);
+        let peak = Arc::clone(&exec.peak_buffer);
+        let session = Session::start(exec, &options(Arc::new(SystemClock), false)).unwrap();
+        let dict = GuardedSelect::parse(
+            r#"SELECT "OBJECT_TYPE" FROM "ALL_OBJECTS" WHERE "OWNER" = :1 AND "OBJECT_NAME" = :2"#,
+            SqlDialect::Oracle,
+        )
+        .unwrap();
+        session
+            .read_all(
+                &dict,
+                &[
+                    Value::Text("SALES".to_string()),
+                    Value::Text("ORDERS".to_string()),
+                ],
+            )
+            .unwrap();
+        let plan = build::snapshot(
+            SqlDialect::Oracle,
+            &crate::source::SelectSpec {
+                table: "T".to_string(),
+                columns: vec!["K".to_string(), "A".to_string()],
+                filters: Vec::new(),
+                limit: None,
+                batch_rows: 1,
+                key: None,
+                paging: crate::source::Paging::Snapshot,
+            },
+        )
+        .unwrap();
+        let mut seen = 0usize;
+        let mut iter = session.chunks(plan.clone());
+        for chunk in iter.by_ref() {
+            seen += chunk.unwrap().rows.len();
+        }
+        assert_eq!(seen, 2);
+        drop(iter);
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec![
+                "ALTER SESSION DISABLE PARALLEL QUERY".to_string(),
+                "ALTER SESSION SET NLS_SORT = BINARY".to_string(),
+                "ALTER SESSION SET NLS_COMP = BINARY".to_string(),
+                "ALTER SESSION SET READ_ONLY = TRUE".to_string(),
+                "SET TRANSACTION READ ONLY".to_string(),
+                dict.sql().to_string(),
+                "ROLLBACK".to_string(),
+                "SET TRANSACTION READ ONLY".to_string(),
+                plan.first.sql().to_string(),
+                "ROLLBACK".to_string(),
+            ]
+        );
+        assert!(
+            peak.load(Ordering::SeqCst) <= plan.batch_rows.saturating_mul(2).max(1),
+            "snapshot buffer {} exceeded about one fetch",
+            peak.load(Ordering::SeqCst)
+        );
     }
 
     #[test]
