@@ -33,6 +33,14 @@ pub fn validate_dip_name(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// One column, key, or filter name. A dot is only allowed in a table name.
+pub fn validate_column_ident(s: &str) -> Result<(), String> {
+    if s.contains('.') {
+        return Err("invalid identifier".to_string());
+    }
+    validate_ident(s)
+}
+
 /// Quote each dot-separated segment of an already validated identifier.
 pub fn quote_ident(s: &str) -> String {
     s.split('.')
@@ -58,6 +66,15 @@ mod tests {
             let err = validate_ident(ident).unwrap_err();
             assert!(err.contains("invalid identifier"), "{ident}: {err}");
         }
+    }
+
+    #[test]
+    fn column_names_cannot_contain_a_dot() {
+        assert!(validate_column_ident("ORDER_ID").is_ok());
+        assert!(validate_column_ident("A$B#C").is_ok());
+        let err = validate_column_ident("PKG.F").unwrap_err();
+        assert!(err.contains("invalid identifier"), "{err}");
+        assert!(validate_ident("SALES.ORDERS").is_ok());
     }
 
     #[test]

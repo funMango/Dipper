@@ -8,7 +8,7 @@ pub use env::{substitute, substitute_secret};
 pub use schema::{Config, Dip, Filter, FilterOp, Paging, Performance, Secret, SourceConfig};
 
 use crate::error::{ConfigIssue, DipperError};
-use crate::sql::{validate_dip_name, validate_ident};
+use crate::sql::{validate_column_ident, validate_dip_name, validate_ident};
 use schema::{
     RawConfig, RawPerformance, RawSource, DEFAULT_BATCH_ROWS, DEFAULT_CALL_TIMEOUT_SECS,
     DEFAULT_MAX_SESSION_MINUTES, DEFAULT_MEMORY_LIMIT, DEFAULT_PROGRESS_EVERY_ROWS, DEFAULT_STORE,
@@ -344,7 +344,7 @@ fn validate_dip(
     let mut seen_columns: Vec<&str> = Vec::new();
     for (column_index, column) in dip.columns.iter().enumerate() {
         let path = format!("dips[{index}].columns[{column_index}]");
-        if let Err(message) = validate_ident(column) {
+        if let Err(message) = validate_column_ident(column) {
             push(issues, path.clone(), message);
         }
         if seen_columns.iter().any(|seen| *seen == column) {
@@ -354,7 +354,7 @@ fn validate_dip(
     }
 
     for (filter_index, filter) in dip.filters.iter().enumerate() {
-        if let Err(message) = validate_ident(&filter.column) {
+        if let Err(message) = validate_column_ident(&filter.column) {
             push(
                 issues,
                 format!("dips[{index}].filters[{filter_index}].column"),
@@ -378,7 +378,7 @@ fn validate_dip(
         );
     }
     if let Some(key) = &dip.key {
-        if let Err(message) = validate_ident(key) {
+        if let Err(message) = validate_column_ident(key) {
             push(issues, format!("dips[{index}].key"), message);
         }
     }

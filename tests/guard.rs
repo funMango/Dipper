@@ -97,7 +97,16 @@ fn rejects_unquoted_oracle_identifiers() {
     accept(r#"SELECT "SYSDATE" FROM DUAL"#, SqlDialect::Oracle);
     accept(r#"SELECT "A" FROM "DUAL""#, SqlDialect::Oracle);
     accept(r#"SELECT COUNT(*) FROM "T""#, SqlDialect::Oracle);
-    accept(r#"SELECT "PKG"."F" FROM "T""#, SqlDialect::Oracle);
+    for sql in [
+        r#"SELECT "PKG"."F" FROM "T""#,
+        r#"SELECT "A" FROM "T" WHERE "PKG"."F" = :1"#,
+        r#"SELECT "A" FROM "T" ORDER BY "PKG"."F""#,
+        r#"SELECT "T"."A" FROM "T""#,
+        r#"SELECT "A" FROM "T" WHERE "T"."A" = :1"#,
+        r#"SELECT "A" FROM "T" ORDER BY "T"."A""#,
+    ] {
+        reject_both(sql);
+    }
 }
 
 #[test]

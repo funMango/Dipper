@@ -148,9 +148,11 @@ fn check_order_by(order_by: &OrderBy, dialect: SqlDialect) -> Result<(), GuardEr
         }
         match &expr.expr {
             Expr::Identifier(ident) => check_ident(ident, dialect)?,
-            Expr::CompoundIdentifier(idents) => idents
-                .iter()
-                .try_for_each(|ident| check_ident(ident, dialect))?,
+            Expr::CompoundIdentifier(_) => {
+                return Err(GuardError(
+                    "qualified column names are not allowed".to_string(),
+                ));
+            }
             _ => return Err(GuardError("ORDER BY must be an identifier".to_string())),
         }
     }
@@ -273,9 +275,9 @@ fn check_projection(item: &SelectItem, dialect: SqlDialect) -> Result<(), GuardE
     };
     match expr {
         Expr::Identifier(ident) => check_ident(ident, dialect),
-        Expr::CompoundIdentifier(idents) => idents
-            .iter()
-            .try_for_each(|ident| check_ident(ident, dialect)),
+        Expr::CompoundIdentifier(_) => Err(GuardError(
+            "qualified column names are not allowed".to_string(),
+        )),
         Expr::Value(value) if is_number(value) => Ok(()),
         Expr::Function(function) if is_count_star(function) => Ok(()),
         _ => Err(GuardError(
@@ -287,9 +289,9 @@ fn check_projection(item: &SelectItem, dialect: SqlDialect) -> Result<(), GuardE
 fn check_where(expr: &Expr, dialect: SqlDialect) -> Result<(), GuardError> {
     match expr {
         Expr::Identifier(ident) => check_ident(ident, dialect),
-        Expr::CompoundIdentifier(idents) => idents
-            .iter()
-            .try_for_each(|ident| check_ident(ident, dialect)),
+        Expr::CompoundIdentifier(_) => Err(GuardError(
+            "qualified column names are not allowed".to_string(),
+        )),
         Expr::Nested(inner) => check_where(inner, dialect),
         Expr::Value(value) if is_number(value) || is_placeholder(value) => Ok(()),
         Expr::BinaryOp { left, op, right } if is_allowed_operator(op) => {

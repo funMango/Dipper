@@ -687,6 +687,54 @@ path = "sample.db"
 [[dips]]
 name = "orders"
 source = "sample"
+table = "SALES.ORDERS"
+columns = ["PKG.F"]
+"#,
+        &["dips[0].columns[0]", "invalid identifier"],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+key = "PKG.F"
+"#,
+        &["dips[0].key", "invalid identifier"],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+
+[[dips.filters]]
+column = "PKG.F"
+op = "eq"
+value = "x"
+"#,
+        &["dips[0].filters[0].column", "invalid identifier"],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
 table = "ORDERS"
 columns = ["ORDER_ID"]
 paging = "offset"
