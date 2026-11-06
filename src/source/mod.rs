@@ -1,4 +1,8 @@
+mod logging;
+mod preflight;
+mod session;
 mod sqlite;
+mod watchdog;
 
 #[cfg(feature = "oracle")]
 mod oracle;
