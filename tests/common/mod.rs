@@ -58,6 +58,63 @@ pub fn make_sqlite(dir: &Path, file: &str, tables: &[&str]) -> PathBuf {
     path
 }
 
+/// Build ORDERS (10_000), CUSTOMERS (20_000) and ITEMS (30_000) for chunked reads.
+pub fn make_bulk_sqlite(dir: &Path, file: &str) -> PathBuf {
+    let path = dir.join(file);
+    let mut conn = Connection::open(&path).expect("create bulk sqlite source");
+    conn.execute_batch(
+        "CREATE TABLE ORDERS (ORDER_ID INTEGER, STATUS TEXT, AMOUNT REAL);
+         CREATE TABLE CUSTOMERS (CUSTOMER_ID INTEGER, REGION TEXT);
+         CREATE TABLE ITEMS (ITEM_ID INTEGER, ORDER_ID INTEGER, QTY INTEGER);",
+    )
+    .unwrap();
+    insert_series(
+        &mut conn,
+        "INSERT INTO ORDERS (ORDER_ID, STATUS, AMOUNT) VALUES (?1, ?2, ?3)",
+        10_000,
+        |index, stmt| {
+            let status = if index % 2 == 0 { "PAID" } else { "SHIPPED" };
+            stmt.execute(rusqlite::params![index, status, index as f64])
+                .unwrap();
+        },
+    );
+    insert_series(
+        &mut conn,
+        "INSERT INTO CUSTOMERS (CUSTOMER_ID, REGION) VALUES (?1, ?2)",
+        20_000,
+        |index, stmt| {
+            stmt.execute(rusqlite::params![index, format!("R{index}")])
+                .unwrap();
+        },
+    );
+    insert_series(
+        &mut conn,
+        "INSERT INTO ITEMS (ITEM_ID, ORDER_ID, QTY) VALUES (?1, ?2, ?3)",
+        30_000,
+        |index, stmt| {
+            stmt.execute(rusqlite::params![index, index % 10_000, index % 7])
+                .unwrap();
+        },
+    );
+    path
+}
+
+fn insert_series(
+    conn: &mut Connection,
+    sql: &str,
+    count: i64,
+    mut write: impl FnMut(i64, &mut rusqlite::Statement<'_>),
+) {
+    let tx = conn.transaction().unwrap();
+    {
+        let mut stmt = tx.prepare(sql).unwrap();
+        for index in 1..=count {
+            write(index, &mut stmt);
+        }
+    }
+    tx.commit().unwrap();
+}
+
 pub fn write_config(dir: &Path, toml_text: &str) -> PathBuf {
     let path = dir.join("dipper.toml");
     std::fs::write(&path, toml_text).unwrap();

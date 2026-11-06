@@ -1,11 +1,9 @@
-#![allow(dead_code)] // sources call this protocol in the following commits
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::DipperError;
-use crate::source::preflight::{Finding, Level};
+use crate::source::preflight::{parse_dict, DictQuery, Dictionary, Finding, Level};
 use crate::source::watchdog::{Breaker, Clock, Watchdog};
 use crate::source::{Chunk, ChunkIter, Value};
 use crate::sql::build::ReadPlan;
@@ -210,6 +208,15 @@ impl<E: Executor> Session<E> {
         &self.findings
     }
 
+    pub(crate) fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn executor(&self) -> &E {
+        &self.exec
+    }
+
     pub(crate) fn strict(&self) -> bool {
         self.strict
     }
@@ -272,6 +279,13 @@ impl<E: Executor> Drop for Session<E> {
     fn drop(&mut self) {
         self.watchdog.take();
         let _ = self.exec.close();
+    }
+}
+
+impl<E: Executor> Dictionary for Session<E> {
+    fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError> {
+        let guarded = parse_dict(query)?;
+        self.read_all(&guarded, binds)
     }
 }
 
@@ -756,6 +770,8 @@ mod tests {
                 filters: Vec::new(),
                 limit: Some(limit),
                 batch_rows,
+                key: None,
+                paging: crate::source::Paging::Keyset,
             },
             "K",
         )
@@ -879,6 +895,8 @@ mod tests {
                 filters: Vec::new(),
                 limit: None,
                 batch_rows: 1,
+                key: None,
+                paging: crate::source::Paging::Keyset,
             },
         )
         .unwrap();
@@ -965,6 +983,8 @@ mod tests {
                 filters: Vec::new(),
                 limit: None,
                 batch_rows: 1,
+                key: None,
+                paging: crate::source::Paging::Keyset,
             },
         )
         .unwrap();

@@ -40,6 +40,20 @@ impl Source for OracleSource {
             .map_err(|err| oracle_error(&self.name, &err, None))
     }
 
+    fn preflight(
+        &self,
+        dip: &str,
+        spec: &crate::source::SelectSpec,
+    ) -> Result<crate::source::PreflightReport, DipperError> {
+        let _ = (dip, spec);
+        Err(DipperError::NotImplemented("preflight"))
+    }
+
+    fn count(&self, spec: &crate::source::SelectSpec) -> Result<u64, DipperError> {
+        let _ = spec;
+        Err(DipperError::NotImplemented("count"))
+    }
+
     fn select<'a>(&'a self, spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError> {
         let _ = spec;
         Err(DipperError::NotImplemented("select"))

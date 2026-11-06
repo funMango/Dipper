@@ -1,5 +1,3 @@
-#![allow(dead_code)] // sessions start a watchdog in this module's caller
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};

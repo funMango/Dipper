@@ -7,12 +7,24 @@ mod watchdog;
 #[cfg(feature = "oracle")]
 mod oracle;
 
+use std::time::Duration;
+
 use crate::config::{Config, Filter, SourceConfig};
 use crate::error::DipperError;
 
+pub use logging::SqlLogSink;
+pub use preflight::{Finding, KeySource, Level, PreflightReport, ResolvedKey};
+pub use session::SessionStatement;
 pub use sqlite::SqliteSource;
 
-/// What a later PR will ask a source to read. PR2 does not execute it.
+/// How a dip walks the source table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paging {
+    Keyset,
+    Snapshot,
+}
+
+/// What to read from a source. SQL is built from these fields, not supplied by the caller.
 #[derive(Debug)]
 pub struct SelectSpec {
     pub table: String,
@@ -20,6 +32,8 @@ pub struct SelectSpec {
     pub filters: Vec<Filter>,
     pub limit: Option<u64>,
     pub batch_rows: usize,
+    pub key: Option<String>,
+    pub paging: Paging,
 }
 
 /// A scalar value read from a source. Dates and timestamps arrive in PR3.
@@ -46,7 +60,23 @@ pub trait Source {
     fn name(&self) -> &str;
     fn kind(&self) -> &'static str;
     fn test_connection(&self) -> Result<(), DipperError>;
+    fn preflight(&self, dip: &str, spec: &SelectSpec) -> Result<PreflightReport, DipperError>;
+    fn count(&self, spec: &SelectSpec) -> Result<u64, DipperError>;
     fn select<'a>(&'a self, spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError>;
+}
+
+/// How `open` should treat warnings and statement logging.
+#[derive(Debug, Clone)]
+pub struct OpenOptions {
+    pub strict: bool,
+    pub log: SqlLogSink,
+    pub action: String,
+}
+
+/// A source plus the notes and warnings from session setup.
+pub struct Opened {
+    pub source: Box<dyn Source>,
+    pub findings: Vec<Finding>,
 }
 
 #[derive(Debug)]
@@ -54,16 +84,17 @@ pub struct CheckResult {
     pub name: String,
     pub kind: &'static str,
     pub outcome: Result<(), String>,
+    pub findings: Vec<Finding>,
 }
 
-pub fn open(name: &str, cfg: &SourceConfig) -> Result<Box<dyn Source>, DipperError> {
+pub fn open(name: &str, cfg: &SourceConfig, opts: &OpenOptions) -> Result<Opened, DipperError> {
     match cfg {
-        SourceConfig::Sqlite { path } => Ok(Box::new(SqliteSource::open(name, path)?)),
+        SourceConfig::Sqlite { path } => SqliteSource::open(name, path, opts),
         SourceConfig::Oracle {
             connect,
             user,
             password,
-        } => open_oracle(name, connect, user, password),
+        } => open_oracle(name, connect, user, password, opts),
     }
 }
 
@@ -73,10 +104,15 @@ fn open_oracle(
     connect: &str,
     user: &str,
     password: &crate::config::Secret,
-) -> Result<Box<dyn Source>, DipperError> {
-    Ok(Box::new(oracle::OracleSource::connect(
-        name, connect, user, password,
-    )?))
+    opts: &OpenOptions,
+) -> Result<Opened, DipperError> {
+    let _ = opts;
+    Ok(Opened {
+        source: Box::new(oracle::OracleSource::connect(
+            name, connect, user, password,
+        )?),
+        findings: Vec::new(),
+    })
 }
 
 #[cfg(not(feature = "oracle"))]
@@ -85,8 +121,9 @@ fn open_oracle(
     connect: &str,
     user: &str,
     password: &crate::config::Secret,
-) -> Result<Box<dyn Source>, DipperError> {
-    let _ = (connect, user, password);
+    opts: &OpenOptions,
+) -> Result<Opened, DipperError> {
+    let _ = (connect, user, password, opts);
     Err(DipperError::Source {
         source_name: name.to_string(),
         message: "oracle support is not built in (build with --features oracle)".to_string(),
@@ -95,19 +132,29 @@ fn open_oracle(
 
 /// Open every source and test it. One failure does not stop the rest.
 /// Results follow source name order.
-pub fn check_all(config: &Config) -> Vec<CheckResult> {
+pub fn check_all(config: &Config, opts: &OpenOptions) -> Vec<CheckResult> {
     config
         .sources
         .iter()
-        .map(|(name, cfg)| CheckResult {
-            name: name.clone(),
-            kind: kind_of(cfg),
-            outcome: match open(name, cfg) {
-                Ok(source) => source.test_connection().map_err(failure_reason),
-                Err(err) => Err(failure_reason(err)),
+        .map(|(name, cfg)| match open(name, cfg, opts) {
+            Ok(opened) => CheckResult {
+                name: name.clone(),
+                kind: opened.source.kind(),
+                outcome: opened.source.test_connection().map_err(failure_reason),
+                findings: opened.findings,
+            },
+            Err(err) => CheckResult {
+                name: name.clone(),
+                kind: kind_of(cfg),
+                outcome: Err(failure_reason(err)),
+                findings: Vec::new(),
             },
         })
         .collect()
+}
+
+pub(crate) fn session_deadline(minutes: u64) -> Duration {
+    Duration::from_secs(minutes.saturating_mul(60))
 }
 
 fn kind_of(cfg: &SourceConfig) -> &'static str {

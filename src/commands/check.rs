@@ -30,7 +30,12 @@ pub fn run(config_path: &Path, out: &mut dyn Write) -> Result<(), DipperError> {
         }
     }
 
-    let results = source::check_all(&config);
+    let opts = source::OpenOptions {
+        strict: false,
+        log: source::SqlLogSink::Off,
+        action: "check".to_string(),
+    };
+    let results = source::check_all(&config, &opts);
     let total = results.len();
     let mut failed = 0usize;
     for result in &results {

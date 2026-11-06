@@ -1,5 +1,3 @@
-#![allow(dead_code)] // `dipper check` selects a sink in a later commit
-
 use std::sync::{Arc, Mutex};
 
 use crate::error::DipperError;
@@ -12,7 +10,7 @@ use crate::sql::guard::{GuardedSelect, SqlDialect};
 pub type SqlLog = Arc<Mutex<Vec<String>>>;
 
 /// Where each statement sent to a source is copied.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SqlLogSink {
     Off,
     Stderr,
@@ -28,6 +26,11 @@ pub(crate) struct LoggingExecutor<E: Executor> {
 impl<E: Executor> LoggingExecutor<E> {
     pub(crate) fn new(inner: E, sink: SqlLogSink) -> Self {
         Self { inner, sink }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inner(&self) -> &E {
+        &self.inner
     }
 
     fn record(&self, sql: &str) {

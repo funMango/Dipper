@@ -1,5 +1,5 @@
 use dipper::config::{Filter, FilterOp};
-use dipper::source::SelectSpec;
+use dipper::source::{Paging, SelectSpec};
 use dipper::sql::build::{self, ReadPlan};
 use dipper::sql::guard::{GuardedSelect, SqlDialect};
 
@@ -234,5 +234,7 @@ fn spec(op: FilterOp, limit: Option<u64>) -> SelectSpec {
         }],
         limit,
         batch_rows: 1000,
+        key: None,
+        paging: Paging::Keyset,
     }
 }
