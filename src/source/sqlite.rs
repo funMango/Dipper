@@ -19,15 +19,18 @@ use crate::source::{
 use crate::sql::build;
 use crate::sql::guard::{GuardedSelect, SqlDialect};
 
-const DEFAULT_SESSION_MINUTES: u64 = 480;
-
 pub struct SqliteSource {
     session: Session<LoggingExecutor<SqliteExec>>,
 }
 
 impl SqliteSource {
-    pub(crate) fn open(name: &str, path: &Path, opts: &OpenOptions) -> Result<Opened, DipperError> {
-        let source = Self::connect(name, path, opts)?;
+    pub(crate) fn open(
+        name: &str,
+        path: &Path,
+        max_session_minutes: u64,
+        opts: &OpenOptions,
+    ) -> Result<Opened, DipperError> {
+        let source = Self::connect(name, path, max_session_minutes, opts)?;
         let findings = source.session.findings().to_vec();
         Ok(Opened {
             source: Box::new(source),
@@ -38,6 +41,7 @@ impl SqliteSource {
     pub(crate) fn connect(
         name: &str,
         path: &Path,
+        max_session_minutes: u64,
         opts: &OpenOptions,
     ) -> Result<Self, DipperError> {
         let mut conn = Connection::open_with_flags(
@@ -70,7 +74,7 @@ impl SqliteSource {
             &SessionOptions {
                 source_name: name.to_string(),
                 strict: opts.strict,
-                deadline: session_deadline(DEFAULT_SESSION_MINUTES),
+                deadline: session_deadline(max_session_minutes),
                 clock: Arc::new(SystemClock),
                 tick: Duration::from_secs(1),
             },
@@ -359,6 +363,7 @@ mod tests {
         SqliteSource::connect(
             name,
             path,
+            480,
             &OpenOptions {
                 strict: false,
                 log: crate::source::SqlLogSink::Off,
@@ -390,6 +395,7 @@ mod tests {
         let src = SqliteSource::connect(
             "t",
             &path,
+            480,
             &OpenOptions {
                 strict: false,
                 log: crate::source::SqlLogSink::Off,
@@ -416,6 +422,7 @@ mod tests {
         let Err(err) = SqliteSource::connect(
             "missing",
             &path,
+            480,
             &OpenOptions {
                 strict: false,
                 log: crate::source::SqlLogSink::Off,

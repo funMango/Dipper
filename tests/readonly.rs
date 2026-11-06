@@ -31,6 +31,7 @@ fn read_all(
 ) -> (Vec<Vec<Value>>, Vec<usize>) {
     let cfg = SourceConfig::Sqlite {
         path: path.to_path_buf(),
+        max_session_minutes: 480,
     };
     let log = Arc::new(Mutex::new(Vec::new()));
     let opened = open(
@@ -151,7 +152,10 @@ fn filter_value_is_bound_and_limit_is_honored() {
     let _lock = lock();
     let dir = tempfile::tempdir().unwrap();
     let path = common::make_bulk_sqlite(dir.path(), "bulk.db");
-    let cfg = SourceConfig::Sqlite { path: path.clone() };
+    let cfg = SourceConfig::Sqlite {
+        path: path.clone(),
+        max_session_minutes: 480,
+    };
     let log = Arc::new(Mutex::new(Vec::new()));
     let opened = open(
         "sample",
@@ -221,7 +225,10 @@ fn explicit_key_matches_and_warns() {
     let _lock = lock();
     let dir = tempfile::tempdir().unwrap();
     let path = common::make_bulk_sqlite(dir.path(), "bulk.db");
-    let cfg = SourceConfig::Sqlite { path: path.clone() };
+    let cfg = SourceConfig::Sqlite {
+        path: path.clone(),
+        max_session_minutes: 480,
+    };
     let opened = open(
         "sample",
         &cfg,
@@ -263,7 +270,10 @@ fn a_second_source_is_busy_until_the_first_closes() {
     let _lock = lock();
     let dir = tempfile::tempdir().unwrap();
     let path = common::make_sqlite(dir.path(), "sample.db", &["ORDERS"]);
-    let cfg = SourceConfig::Sqlite { path };
+    let cfg = SourceConfig::Sqlite {
+        path,
+        max_session_minutes: 480,
+    };
     let opts = OpenOptions {
         strict: false,
         log: SqlLogSink::Off,

@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use env::{substitute, substitute_secret};
-pub use schema::{Config, Dip, Filter, FilterOp, Performance, Secret, SourceConfig};
+pub use schema::{Config, Dip, Filter, FilterOp, Paging, Performance, Secret, SourceConfig};
 
 use crate::error::{ConfigIssue, DipperError};
 use crate::sql::{validate_dip_name, validate_ident};
 use schema::{
-    RawConfig, RawPerformance, RawSource, DEFAULT_BATCH_ROWS, DEFAULT_MEMORY_LIMIT,
-    DEFAULT_PROGRESS_EVERY_ROWS, DEFAULT_STORE, DEFAULT_TEMP_DIRECTORY, PASSWORD_MUST_BE_STRING,
+    RawConfig, RawPerformance, RawSource, DEFAULT_BATCH_ROWS, DEFAULT_CALL_TIMEOUT_SECS,
+    DEFAULT_MAX_SESSION_MINUTES, DEFAULT_MEMORY_LIMIT, DEFAULT_PROGRESS_EVERY_ROWS, DEFAULT_STORE,
+    DEFAULT_TEMP_DIRECTORY, PASSWORD_MUST_BE_STRING,
 };
 
 /// Load `path`, substituting environment variables from the process environment.
@@ -71,11 +72,18 @@ pub fn load_with_env(
                 .collect(),
             limit: dip.limit,
             count_first: dip.count_first.unwrap_or(false),
+            key: dip.key.clone(),
+            paging: dip.paging.unwrap_or(schema::Paging::Keyset),
         })
         .collect();
 
     Ok(Config {
         file: path.to_path_buf(),
+        strict_readonly: raw
+            .safety
+            .as_ref()
+            .and_then(|safety| safety.strict_readonly)
+            .unwrap_or(false),
         store: resolve_path(&base, store_value.as_deref().unwrap_or(DEFAULT_STORE)),
         performance: Performance {
             batch_rows: performance.batch_rows,
@@ -227,6 +235,7 @@ fn offset_to_line_col(text: &str, index: usize) -> (usize, usize) {
 
 fn validate(raw: &RawConfig, issues: &mut Vec<ConfigIssue>) -> CheckedPerformance {
     let performance = validate_performance(raw.performance.as_ref(), issues);
+    validate_sources(raw, issues);
     if raw.sources.is_empty() {
         push(issues, "sources", "at least one source is required");
     }
@@ -368,6 +377,50 @@ fn validate_dip(
             "must be greater than 0",
         );
     }
+    if let Some(key) = &dip.key {
+        if let Err(message) = validate_ident(key) {
+            push(issues, format!("dips[{index}].key"), message);
+        }
+    }
+}
+
+fn validate_sources(raw: &RawConfig, issues: &mut Vec<ConfigIssue>) {
+    for (name, source) in &raw.sources {
+        match source {
+            RawSource::Sqlite {
+                max_session_minutes,
+                ..
+            } => {
+                require_positive(
+                    issues,
+                    format!("sources.{name}.max_session_minutes"),
+                    *max_session_minutes,
+                );
+            }
+            RawSource::Oracle {
+                call_timeout_secs,
+                max_session_minutes,
+                ..
+            } => {
+                require_positive(
+                    issues,
+                    format!("sources.{name}.call_timeout_secs"),
+                    *call_timeout_secs,
+                );
+                require_positive(
+                    issues,
+                    format!("sources.{name}.max_session_minutes"),
+                    *max_session_minutes,
+                );
+            }
+        }
+    }
+}
+
+fn require_positive(issues: &mut Vec<ConfigIssue>, path: String, value: Option<u64>) {
+    if value == Some(0) {
+        push(issues, path, "must be greater than 0");
+    }
 }
 
 fn validate_filter_value(op: FilterOp, value: Option<&toml::Value>) -> Result<(), String> {
@@ -427,7 +480,10 @@ fn substitute_sources(
     let mut sources = BTreeMap::new();
     for (name, source) in &raw.sources {
         match source {
-            RawSource::Sqlite { path } => {
+            RawSource::Sqlite {
+                path,
+                max_session_minutes,
+            } => {
                 let field = format!("sources.{name}.path");
                 match substitute(path, &field, lookup) {
                     Ok(value) => {
@@ -435,6 +491,8 @@ fn substitute_sources(
                             name.clone(),
                             SourceConfig::Sqlite {
                                 path: resolve_path(base, &value),
+                                max_session_minutes: max_session_minutes
+                                    .unwrap_or(DEFAULT_MAX_SESSION_MINUTES),
                             },
                         );
                     }
@@ -445,6 +503,8 @@ fn substitute_sources(
                 connect,
                 user,
                 password,
+                call_timeout_secs,
+                max_session_minutes,
             } => {
                 let connect_field = format!("sources.{name}.connect");
                 let user_field = format!("sources.{name}.user");
@@ -460,6 +520,10 @@ fn substitute_sources(
                                 connect,
                                 user,
                                 password,
+                                call_timeout_secs: call_timeout_secs
+                                    .unwrap_or(DEFAULT_CALL_TIMEOUT_SECS),
+                                max_session_minutes: max_session_minutes
+                                    .unwrap_or(DEFAULT_MAX_SESSION_MINUTES),
                             },
                         );
                     }
@@ -540,6 +604,7 @@ password = "${DIPPER_TEST_ORA_PASSWORD}"
                 connect,
                 user,
                 password,
+                ..
             }) => {
                 assert_eq!(connect, "host/db.example:1521/SVC");
                 assert_eq!(user, "scott");

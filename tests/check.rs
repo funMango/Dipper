@@ -154,7 +154,7 @@ fn verbose_company_check(dir: &Path) -> std::process::Output {
     common::dipper()
         .env("DIPPER_TEST_ORA_USER", "scott")
         .env("DIPPER_TEST_ORA_PASSWORD", "PR2-canary-7f1d9c")
-        .args(["--verbose", "check", "--config"])
+        .args(["--verbose", "--log-sql", "check", "--config"])
         .arg(&config)
         .output()
         .unwrap()
@@ -204,4 +204,134 @@ fn oracle_source_without_client_reports_dpi_1047() {
     assert!(line.contains("docs/ORACLE_SETUP.md"), "{line}");
     assert!(!stdout.contains("PR2-canary-7f1d9c"), "{stdout}");
     assert!(!stderr.contains("PR2-canary-7f1d9c"), "{stderr}");
+}
+
+fn view_db(dir: &Path) {
+    let conn = rusqlite::Connection::open(dir.join("sample.db")).unwrap();
+    conn.execute("CREATE TABLE ORDERS (ORDER_ID INTEGER)", [])
+        .unwrap();
+    conn.execute("CREATE VIEW V_ORDERS AS SELECT ORDER_ID FROM ORDERS", [])
+        .unwrap();
+}
+
+fn view_config(dir: &Path, safety: bool) -> std::path::PathBuf {
+    view_db(dir);
+    let safety = if safety {
+        "[safety]\nstrict_readonly = true\n\n"
+    } else {
+        ""
+    };
+    common::write_config(
+        dir,
+        &format!(
+            r#"
+{safety}[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "V_ORDERS"
+columns = ["ORDER_ID"]
+paging = "snapshot"
+"#
+        ),
+    )
+}
+
+#[test]
+fn sqlite_view_warns_and_strict_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = view_config(dir.path(), false);
+    let output = common::dipper()
+        .args(["check", "--config"])
+        .arg(&config)
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = output_text(&output);
+    assert!(stdout.contains("sample (sqlite): OK"), "{stdout}");
+    assert!(
+        stdout.contains("  warning: orders: target is a view (V_ORDERS)"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.lines().last(), Some("1 of 1 sources OK"));
+
+    let strict = common::dipper()
+        .args(["--strict", "check", "--config"])
+        .arg(&config)
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = output_text(&strict);
+    assert!(
+        stdout.contains("sample (sqlite): FAIL - strict: 1 warning(s)"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("check failed"), "{stderr}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = view_config(dir.path(), true);
+    let output = common::dipper()
+        .args(["check", "--config"])
+        .arg(&config)
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, _) = output_text(&output);
+    assert!(stdout.contains("FAIL - strict: 1 warning(s)"), "{stdout}");
+}
+
+#[test]
+fn missing_table_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    common::make_sqlite(dir.path(), "sample.db", &["ORDERS"]);
+    let config = common::write_config(
+        dir.path(),
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "MISSING"
+columns = ["ORDER_ID"]
+"#,
+    );
+    let output = common::dipper()
+        .args(["check", "--config"])
+        .arg(&config)
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = output_text(&output);
+    assert!(stdout.contains("  refused: orders:"), "{stdout}");
+    assert!(stderr.contains("check failed"), "{stderr}");
+}
+
+#[test]
+fn log_sql_prints_statements_without_bind_values() {
+    let dir = tempfile::tempdir().unwrap();
+    common::make_sqlite(dir.path(), "sample.db", &["ORDERS"]);
+    let config = sqlite_sources(dir.path(), &[("sample", "sample.db")]);
+    let output = common::dipper()
+        .args(["--log-sql", "check", "--config"])
+        .arg(&config)
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = output_text(&output);
+    assert!(stderr.contains("sql: PRAGMA query_only = ON"), "{stderr}");
+    assert!(
+        stderr.contains("sql: SELECT 1 FROM sqlite_master LIMIT 1"),
+        "{stderr}"
+    );
 }

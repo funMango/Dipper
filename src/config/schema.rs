@@ -32,9 +32,16 @@ impl std::fmt::Debug for Secret {
 pub struct RawConfig {
     pub(crate) store: Option<String>,
     pub(crate) performance: Option<RawPerformance>,
+    pub(crate) safety: Option<RawSafety>,
     pub(crate) sources: BTreeMap<String, RawSource>,
     #[serde(default)]
     pub(crate) dips: Vec<RawDip>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSafety {
+    pub(crate) strict_readonly: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,11 +58,14 @@ pub(crate) struct RawPerformance {
 pub enum RawSource {
     Sqlite {
         path: String,
+        max_session_minutes: Option<u64>,
     },
     Oracle {
         connect: String,
         user: String,
         password: RawPassword,
+        call_timeout_secs: Option<u64>,
+        max_session_minutes: Option<u64>,
     },
 }
 
@@ -162,6 +172,8 @@ pub struct RawDip {
     pub(crate) filters: Vec<RawFilter>,
     pub(crate) limit: Option<u64>,
     pub(crate) count_first: Option<bool>,
+    pub(crate) key: Option<String>,
+    pub(crate) paging: Option<Paging>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +203,7 @@ pub enum FilterOp {
 #[derive(Debug)]
 pub struct Config {
     pub file: PathBuf,
+    pub strict_readonly: bool,
     pub store: PathBuf,
     pub performance: Performance,
     pub sources: BTreeMap<String, SourceConfig>,
@@ -209,11 +222,14 @@ pub struct Performance {
 pub enum SourceConfig {
     Sqlite {
         path: PathBuf,
+        max_session_minutes: u64,
     },
     Oracle {
         connect: String,
         user: String,
         password: Secret,
+        call_timeout_secs: u64,
+        max_session_minutes: u64,
     },
 }
 
@@ -226,9 +242,18 @@ pub struct Dip {
     pub filters: Vec<Filter>,
     pub limit: Option<u64>,
     pub count_first: bool,
+    pub key: Option<String>,
+    pub paging: Paging,
 }
 
-#[derive(Debug)]
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Paging {
+    Keyset,
+    Snapshot,
+}
+
+#[derive(Debug, Clone)]
 pub struct Filter {
     pub column: String,
     pub op: FilterOp,
@@ -240,6 +265,8 @@ pub(crate) const DEFAULT_BATCH_ROWS: usize = 10_000;
 pub(crate) const DEFAULT_MEMORY_LIMIT: &str = "2GB";
 pub(crate) const DEFAULT_TEMP_DIRECTORY: &str = ".dipper/tmp";
 pub(crate) const DEFAULT_PROGRESS_EVERY_ROWS: u64 = 1_000_000;
+pub(crate) const DEFAULT_CALL_TIMEOUT_SECS: u64 = 300;
+pub(crate) const DEFAULT_MAX_SESSION_MINUTES: u64 = 480;
 
 #[cfg(test)]
 mod tests {

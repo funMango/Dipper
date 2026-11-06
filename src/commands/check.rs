@@ -5,12 +5,17 @@ use crate::config::{self, SourceConfig};
 use crate::error::DipperError;
 use crate::source;
 
-pub fn run(config_path: &Path, out: &mut dyn Write) -> Result<(), DipperError> {
+pub fn run(
+    config_path: &Path,
+    strict: bool,
+    log_sql: bool,
+    out: &mut dyn Write,
+) -> Result<(), DipperError> {
     let config = config::load(config_path)?;
     tracing::debug!(path = %config.file.display(), "loaded config");
     for (name, source) in &config.sources {
         match source {
-            SourceConfig::Sqlite { path } => {
+            SourceConfig::Sqlite { path, .. } => {
                 tracing::debug!(
                     source = %name,
                     kind = "sqlite",
@@ -31,8 +36,12 @@ pub fn run(config_path: &Path, out: &mut dyn Write) -> Result<(), DipperError> {
     }
 
     let opts = source::OpenOptions {
-        strict: false,
-        log: source::SqlLogSink::Off,
+        strict: strict || config.strict_readonly,
+        log: if log_sql {
+            source::SqlLogSink::Stderr
+        } else {
+            source::SqlLogSink::Off
+        },
         action: "check".to_string(),
     };
     let results = source::check_all(&config, &opts);
@@ -49,6 +58,9 @@ pub fn run(config_path: &Path, out: &mut dyn Write) -> Result<(), DipperError> {
                 )?;
             }
         }
+        for finding in &result.findings {
+            write_line(out, &finding_line(finding))?;
+        }
     }
     let ok = total - failed;
     write_line(out, &format!("{ok} of {total} sources OK"))?;
@@ -56,6 +68,18 @@ pub fn run(config_path: &Path, out: &mut dyn Write) -> Result<(), DipperError> {
         Ok(())
     } else {
         Err(DipperError::CheckFailed { failed, total })
+    }
+}
+
+fn finding_line(finding: &source::Finding) -> String {
+    let label = match finding.level {
+        source::Level::Note => "note",
+        source::Level::Warn => "warning",
+        source::Level::Refuse => "refused",
+    };
+    match finding.dip.as_deref() {
+        Some(dip) if !dip.is_empty() => format!("  {label}: {dip}: {}", finding.message),
+        _ => format!("  {label}: {}", finding.message),
     }
 }
 

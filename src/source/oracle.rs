@@ -16,9 +16,6 @@ use crate::source::{
 use crate::sql::build;
 use crate::sql::guard::{GuardedSelect, SqlDialect};
 
-const DEFAULT_CALL_TIMEOUT_SECS: u64 = 300;
-const DEFAULT_SESSION_MINUTES: u64 = 480;
-
 pub(crate) struct OracleSource {
     session: Session<LoggingExecutor<OracleExec>>,
 }
@@ -29,6 +26,8 @@ impl OracleSource {
         connect: &str,
         user: &str,
         password: &Secret,
+        call_timeout_secs: u64,
+        max_session_minutes: u64,
         opts: &OpenOptions,
     ) -> Result<Opened, DipperError> {
         let conn = match oracle::Connection::connect(user, password.expose(), connect) {
@@ -42,7 +41,7 @@ impl OracleSource {
                 message: "autocommit is enabled; refusing the connection".to_owned(),
             });
         }
-        let (conn, major) = prepare_session(name, conn, opts)?;
+        let (conn, major) = prepare_session(name, conn, call_timeout_secs, opts)?;
         let conn = Arc::new(conn);
         let breaker = Arc::new(OracleBreaker(Arc::clone(&conn)));
         let exec = LoggingExecutor::new(
@@ -59,7 +58,7 @@ impl OracleSource {
             &SessionOptions {
                 source_name: name.to_owned(),
                 strict: opts.strict,
-                deadline: session_deadline(DEFAULT_SESSION_MINUTES),
+                deadline: session_deadline(max_session_minutes),
                 clock: Arc::new(SystemClock),
                 tick: Duration::from_secs(1),
             },
@@ -75,6 +74,7 @@ impl OracleSource {
 fn prepare_session(
     name: &str,
     conn: oracle::Connection,
+    call_timeout_secs: u64,
     opts: &OpenOptions,
 ) -> Result<(oracle::Connection, i32), DipperError> {
     conn.set_module("Dipper")
@@ -83,7 +83,7 @@ fn prepare_session(
         .map_err(|err| oracle_error(name, &err, None))?;
     conn.set_client_identifier("Dipper")
         .map_err(|err| oracle_error(name, &err, None))?;
-    conn.set_call_timeout(Some(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)))
+    conn.set_call_timeout(Some(Duration::from_secs(call_timeout_secs)))
         .map_err(|err| oracle_error(name, &err, None))?;
     let major = conn
         .server_version()
@@ -294,8 +294,12 @@ impl Source for OracleSource {
     }
 
     fn preflight(&self, dip: &str, spec: &SelectSpec) -> Result<PreflightReport, DipperError> {
-        let _ = (dip, spec);
-        Err(DipperError::NotImplemented("preflight"))
+        Ok(crate::source::preflight::run_oracle(
+            &self.session,
+            self.session.server_major().unwrap_or(0),
+            spec,
+            dip,
+        ))
     }
 
     fn count(&self, spec: &SelectSpec) -> Result<u64, DipperError> {

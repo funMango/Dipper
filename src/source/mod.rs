@@ -89,12 +89,25 @@ pub struct CheckResult {
 
 pub fn open(name: &str, cfg: &SourceConfig, opts: &OpenOptions) -> Result<Opened, DipperError> {
     match cfg {
-        SourceConfig::Sqlite { path } => SqliteSource::open(name, path, opts),
+        SourceConfig::Sqlite {
+            path,
+            max_session_minutes,
+        } => SqliteSource::open(name, path, *max_session_minutes, opts),
         SourceConfig::Oracle {
             connect,
             user,
             password,
-        } => open_oracle(name, connect, user, password, opts),
+            call_timeout_secs,
+            max_session_minutes,
+        } => open_oracle(
+            name,
+            connect,
+            user,
+            password,
+            *call_timeout_secs,
+            *max_session_minutes,
+            opts,
+        ),
     }
 }
 
@@ -104,9 +117,19 @@ fn open_oracle(
     connect: &str,
     user: &str,
     password: &crate::config::Secret,
+    call_timeout_secs: u64,
+    max_session_minutes: u64,
     opts: &OpenOptions,
 ) -> Result<Opened, DipperError> {
-    oracle::OracleSource::connect(name, connect, user, password, opts)
+    oracle::OracleSource::connect(
+        name,
+        connect,
+        user,
+        password,
+        call_timeout_secs,
+        max_session_minutes,
+        opts,
+    )
 }
 
 #[cfg(not(feature = "oracle"))]
@@ -115,9 +138,18 @@ fn open_oracle(
     connect: &str,
     user: &str,
     password: &crate::config::Secret,
+    call_timeout_secs: u64,
+    max_session_minutes: u64,
     opts: &OpenOptions,
 ) -> Result<Opened, DipperError> {
-    let _ = (connect, user, password, opts);
+    let _ = (
+        connect,
+        user,
+        password,
+        call_timeout_secs,
+        max_session_minutes,
+        opts,
+    );
     Err(DipperError::Source {
         source_name: name.to_string(),
         message: "oracle support is not built in (build with --features oracle)".to_string(),
@@ -131,12 +163,30 @@ pub fn check_all(config: &Config, opts: &OpenOptions) -> Vec<CheckResult> {
         .sources
         .iter()
         .map(|(name, cfg)| match open(name, cfg, opts) {
-            Ok(opened) => CheckResult {
-                name: name.clone(),
-                kind: opened.source.kind(),
-                outcome: opened.source.test_connection().map_err(failure_reason),
-                findings: opened.findings,
-            },
+            Ok(opened) => {
+                let mut findings = opened.findings;
+                let mut outcome = opened.source.test_connection().map_err(failure_reason);
+                if outcome.is_ok() {
+                    for dip in config.dips.iter().filter(|dip| &dip.source == name) {
+                        match opened.source.preflight(&dip.name, &spec_for(config, dip)) {
+                            Ok(report) => findings.extend(report.findings),
+                            Err(err) => {
+                                outcome = Err(failure_reason(err));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if outcome.is_ok() {
+                    outcome = summarize(&findings, opts.strict);
+                }
+                CheckResult {
+                    name: name.clone(),
+                    kind: opened.source.kind(),
+                    outcome,
+                    findings,
+                }
+            }
             Err(err) => CheckResult {
                 name: name.clone(),
                 kind: kind_of(cfg),
@@ -145,6 +195,41 @@ pub fn check_all(config: &Config, opts: &OpenOptions) -> Vec<CheckResult> {
             },
         })
         .collect()
+}
+
+fn spec_for(config: &Config, dip: &crate::config::Dip) -> SelectSpec {
+    SelectSpec {
+        table: dip.table.clone(),
+        columns: dip.columns.clone(),
+        filters: dip.filters.clone(),
+        limit: dip.limit,
+        batch_rows: config.performance.batch_rows,
+        key: dip.key.clone(),
+        paging: match dip.paging {
+            crate::config::Paging::Keyset => Paging::Keyset,
+            crate::config::Paging::Snapshot => Paging::Snapshot,
+        },
+    }
+}
+
+fn summarize(findings: &[Finding], strict: bool) -> Result<(), String> {
+    if let Some(finding) = findings
+        .iter()
+        .find(|finding| finding.level == Level::Refuse)
+    {
+        let dip = finding.dip.as_deref().unwrap_or("");
+        return Err(format!("refused: {dip}: {}", finding.message));
+    }
+    if strict {
+        let warnings = findings
+            .iter()
+            .filter(|finding| finding.level == Level::Warn)
+            .count();
+        if warnings > 0 {
+            return Err(format!("strict: {warnings} warning(s)"));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn session_deadline(minutes: u64) -> Duration {

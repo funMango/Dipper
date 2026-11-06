@@ -212,6 +212,11 @@ impl<E: Executor> Session<E> {
         &self.source_name
     }
 
+    #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
+    pub(crate) fn server_major(&self) -> Option<i32> {
+        self.exec.server_major()
+    }
+
     #[cfg(test)]
     pub(crate) fn executor(&self) -> &E {
         &self.exec
