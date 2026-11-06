@@ -316,7 +316,7 @@ pub(crate) fn run_oracle(
                 format!("target is a view ({})", target.name),
             ));
         }
-        check_view_virtual_columns(dict, &target, spec, &mut findings, dip);
+        check_columns(dict, &target, spec, &mut findings, dip);
     } else {
         check_columns(dict, &target, spec, &mut findings, dip);
     }
@@ -588,51 +588,6 @@ fn check_columns(
                 dip,
                 format!("column {column} not found"),
             ));
-            continue;
-        };
-        if text_at(row, 1).as_deref() == Some("YES") {
-            findings.push(finding(
-                Level::Refuse,
-                "virtual-column",
-                dip,
-                format!("column {column} is virtual"),
-            ));
-        }
-    }
-}
-
-fn check_view_virtual_columns(
-    dict: &dyn Dictionary,
-    target: &ObjectRef,
-    spec: &SelectSpec,
-    findings: &mut Vec<Finding>,
-    dip: &str,
-) {
-    let rows = match dict.rows(
-        DictQuery::AllTabCols,
-        &[
-            Value::Text(target.owner.clone()),
-            Value::Text(target.name.clone()),
-        ],
-    ) {
-        Ok(rows) => rows,
-        Err(err) => {
-            unverifiable(findings, dip, &err);
-            return;
-        }
-    };
-    let mut needed = spec.columns.clone();
-    if let Some(key) = &spec.key {
-        needed.push(key.clone());
-    }
-    for filter in &spec.filters {
-        needed.push(filter.column.clone());
-    }
-    for column in needed {
-        let Some(row) = rows
-            .iter()
-            .find(|row| text_at(row, 0).as_deref() == Some(column.as_str()))
-        else {
             continue;
         };
         if text_at(row, 1).as_deref() == Some("YES") {
@@ -1297,6 +1252,18 @@ mod tests {
             &["SALES", "V_ORDERS", "VIEW"],
             cells(&["SALES", "ORDERS", "TABLE", ""]),
         );
+        add(
+            &mut view,
+            DictQuery::AllTabCols,
+            &["SALES", "V_ORDERS"],
+            cells(&["ORDER_ID", "NO", "N"]),
+        );
+        add(
+            &mut view,
+            DictQuery::AllTabCols,
+            &["SALES", "V_ORDERS"],
+            cells(&["STATUS", "NO", "Y"]),
+        );
         let report = run(
             &view,
             19,
@@ -1461,11 +1428,21 @@ mod tests {
         assert!(blocks(&report, true));
 
         let mut view_virtual = view.clone();
+        view_virtual.rows.retain(|(query, binds, _)| {
+            !(*query == DictQuery::AllTabCols
+                && binds == ["SALES".to_string(), "V_ORDERS".to_string()].as_slice())
+        });
         add(
             &mut view_virtual,
             DictQuery::AllTabCols,
             &["SALES", "V_ORDERS"],
             cells(&["ORDER_ID", "YES", "N"]),
+        );
+        add(
+            &mut view_virtual,
+            DictQuery::AllTabCols,
+            &["SALES", "V_ORDERS"],
+            cells(&["STATUS", "NO", "N"]),
         );
         let report = run(
             &view_virtual,
@@ -1473,6 +1450,30 @@ mod tests {
             &spec("SALES.V_ORDERS", Paging::Keyset, Some("ORDER_ID")),
         );
         assert!(has(&report, "virtual-column", Level::Refuse));
+        assert!(blocks(&report, false));
+        assert!(blocks(&report, true));
+
+        let mut missing_col = view.clone();
+        missing_col.rows.retain(|(query, binds, _)| {
+            !(*query == DictQuery::AllTabCols
+                && binds == ["SALES".to_string(), "V_ORDERS".to_string()].as_slice())
+        });
+        add(
+            &mut missing_col,
+            DictQuery::AllTabCols,
+            &["SALES", "V_ORDERS"],
+            cells(&["ORDER_ID", "NO", "N"]),
+        );
+        let report = run(
+            &missing_col,
+            19,
+            &spec("SALES.V_ORDERS", Paging::Keyset, Some("ORDER_ID")),
+        );
+        assert!(has(&report, "column-not-found", Level::Refuse));
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("STATUS")));
         assert!(blocks(&report, false));
         assert!(blocks(&report, true));
     }

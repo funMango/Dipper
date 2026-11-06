@@ -167,11 +167,9 @@ impl Executor for OracleExec {
         let owned = bind_values(binds);
         let params: Vec<&dyn oracle::sql_type::ToSql> =
             owned.iter().map(|value| value.as_ref()).collect();
-        let statement = Box::new(statement);
-        let statement_ptr =
-            statement.as_ref() as *const oracle::Statement as *mut oracle::Statement;
-        // SAFETY: `statement` stays on the heap for as long as `rows` borrows it.
-        let rows = unsafe { (*statement_ptr).query(&params) }.map_err(|err| self.fail(err))?;
+        let rows: oracle::ResultSet<'static, oracle::Row> = statement
+            .into_result_set(&params)
+            .map_err(|err| self.fail(err))?;
         let columns: Vec<String> = rows
             .column_info()
             .iter()
@@ -183,9 +181,7 @@ impl Executor for OracleExec {
             .map(|info| info.oracle_type().clone())
             .collect();
         Ok(Box::new(OracleStream {
-            _binds: owned,
-            statement,
-            rows: Box::into_raw(Box::new(rows)).cast(),
+            rows,
             columns,
             types,
             name: self.name.clone(),
@@ -263,24 +259,10 @@ fn parse_oracle_timestamp(text: &str) -> Value {
 }
 
 struct OracleStream {
-    _binds: Vec<Box<dyn oracle::sql_type::ToSql>>,
-    /// Keeps the statement alive for `rows`.
-    #[allow(dead_code)]
-    statement: Box<oracle::Statement>,
-    rows: *mut oracle::ResultSet<'static, oracle::Row>,
+    rows: oracle::ResultSet<'static, oracle::Row>,
     columns: Vec<String>,
     types: Vec<oracle::sql_type::OracleType>,
     name: String,
-}
-
-impl Drop for OracleStream {
-    fn drop(&mut self) {
-        if !self.rows.is_null() {
-            // SAFETY: created with `Box::into_raw`; the statement it borrows is still alive.
-            unsafe { drop(Box::from_raw(self.rows)) };
-            self.rows = std::ptr::null_mut();
-        }
-    }
 }
 
 impl RowCursor for OracleStream {
@@ -289,8 +271,7 @@ impl RowCursor for OracleStream {
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Value>>, DipperError> {
-        let rows = unsafe { &mut *self.rows };
-        match rows.next() {
+        match self.rows.next() {
             Some(Ok(row)) => {
                 let mut values = Vec::with_capacity(self.columns.len());
                 for (index, oracle_type) in self.types.iter().enumerate() {

@@ -150,21 +150,26 @@ impl Executor for SqliteExec {
         binds: &[Value],
         _fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
-        let mut statement = Box::new(
+        let statement = Box::new(
             self.conn
                 .prepare(query.sql())
                 .map_err(|err| self.fail(err))?,
         );
         let columns: Vec<String> = statement.column_names().map(str::to_string).collect();
         let params: Vec<Bound> = binds.iter().cloned().map(Bound).collect();
-        let statement_ptr = statement.as_mut() as *mut rusqlite::Statement<'_>;
-        // SAFETY: `statement` is heap-allocated and is dropped only after `rows`.
-        // `query` binds `params` immediately, so `rows` borrows only the statement.
-        let rows = unsafe { (*statement_ptr).query(rusqlite::params_from_iter(params.iter())) }
-            .map_err(|err| self.fail(err))?;
+        let statement = Box::into_raw(statement);
+        let rows = match unsafe { query_erased(statement, &params) } {
+            Ok(rows) => rows,
+            Err(err) => {
+                // SAFETY: `query` failed before a row stream existed, so nothing borrows
+                // this statement. The pointer came from `Box::into_raw`.
+                unsafe { drop(Box::from_raw(statement)) };
+                return Err(self.fail(err));
+            }
+        };
         Ok(Box::new(SqliteStream {
             statement,
-            rows: Box::into_raw(Box::new(rows)).cast(),
+            rows,
             columns,
             name: self.name.clone(),
         }))
@@ -207,22 +212,46 @@ fn authorize(ctx: AuthContext<'_>) -> Authorization {
 }
 
 /// One open statement. Rows are stepped one at a time, not copied up front.
+///
+/// Both fields are raw pointers from `Box::into_raw`. `rows` borrows `statement`,
+/// so `Drop` frees `rows` first.
 struct SqliteStream<'conn> {
-    /// Keeps the prepared statement alive for `rows`.
-    #[allow(dead_code)]
-    statement: Box<rusqlite::Statement<'conn>>,
+    statement: *mut rusqlite::Statement<'conn>,
     rows: *mut rusqlite::Rows<'static>,
     columns: Vec<String>,
     name: String,
 }
 
+/// Bind `params` and return a row stream that borrows `statement`.
+///
+/// # Safety
+/// `statement` must be a live `Box::into_raw` pointer. The caller must drop the
+/// returned rows before freeing `statement`.
+unsafe fn query_erased(
+    statement: *mut rusqlite::Statement<'_>,
+    params: &[Bound],
+) -> rusqlite::Result<*mut rusqlite::Rows<'static>> {
+    // SAFETY: caller owns `statement` and keeps it alive until the rows are dropped.
+    let stmt = unsafe { &mut *statement };
+    let rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+    // SAFETY: `Rows` only borrows `statement`. Erasing the lifetime is sound because
+    // the caller drops these rows before `statement`.
+    let rows: rusqlite::Rows<'static> = unsafe { std::mem::transmute(rows) };
+    Ok(Box::into_raw(Box::new(rows)))
+}
+
 impl Drop for SqliteStream<'_> {
     fn drop(&mut self) {
         if !self.rows.is_null() {
-            // SAFETY: `rows` was created from `Box::into_raw` and borrows `statement`,
-            // which is still alive. Drop the row stream before the statement.
+            // SAFETY: `rows` came from `Box::into_raw` and still borrows `statement`.
             unsafe { drop(Box::from_raw(self.rows)) };
             self.rows = std::ptr::null_mut();
+        }
+        if !self.statement.is_null() {
+            // SAFETY: `statement` came from `Box::into_raw`. `rows` is already gone,
+            // so nothing still borrows it.
+            unsafe { drop(Box::from_raw(self.statement)) };
+            self.statement = std::ptr::null_mut();
         }
     }
 }
@@ -233,7 +262,7 @@ impl RowCursor for SqliteStream<'_> {
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Value>>, DipperError> {
-        // SAFETY: `rows` is non-null until Drop and exclusively borrowed here.
+        // SAFETY: `rows` is non-null until Drop and this is the only live borrow.
         let rows = unsafe { &mut *self.rows };
         let width = self.columns.len();
         let name = self.name.clone();

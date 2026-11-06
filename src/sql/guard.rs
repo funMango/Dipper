@@ -49,7 +49,7 @@ impl GuardedSelect {
         let Statement::Query(query) = &parsed[0] else {
             return Err(GuardError("only a single SELECT is allowed".to_string()));
         };
-        check_query(query)?;
+        check_query(query, dialect)?;
         if let ControlFlow::Break(err) = visit_expressions(query.as_ref(), |expr| {
             if let Expr::Function(function) = expr {
                 if !is_count_star(function) {
@@ -104,7 +104,7 @@ fn reject_comments(sql: &str, dialect: SqlDialect) -> Result<(), GuardError> {
     Ok(())
 }
 
-fn check_query(query: &Query) -> Result<(), GuardError> {
+fn check_query(query: &Query, dialect: SqlDialect) -> Result<(), GuardError> {
     if query.with.is_some() {
         return Err(GuardError("WITH is not allowed".to_string()));
     }
@@ -115,7 +115,7 @@ fn check_query(query: &Query) -> Result<(), GuardError> {
         return Err(GuardError("locks are not allowed".to_string()));
     }
     if let Some(order_by) = &query.order_by {
-        check_order_by(order_by)?;
+        check_order_by(order_by, dialect)?;
     }
     if let Some(fetch) = &query.fetch {
         check_fetch(fetch)?;
@@ -126,10 +126,10 @@ fn check_query(query: &Query) -> Result<(), GuardError> {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Err(GuardError("compound queries are not allowed".to_string()));
     };
-    check_select(select)
+    check_select(select, dialect)
 }
 
-fn check_order_by(order_by: &OrderBy) -> Result<(), GuardError> {
+fn check_order_by(order_by: &OrderBy, dialect: SqlDialect) -> Result<(), GuardError> {
     if order_by.interpolate.is_some() {
         return Err(GuardError("ORDER BY must be an identifier".to_string()));
     }
@@ -147,8 +147,10 @@ fn check_order_by(order_by: &OrderBy) -> Result<(), GuardError> {
             return Err(GuardError("ORDER BY must be an identifier".to_string()));
         }
         match &expr.expr {
-            Expr::Identifier(ident) => check_ident(ident)?,
-            Expr::CompoundIdentifier(idents) => idents.iter().try_for_each(check_ident)?,
+            Expr::Identifier(ident) => check_ident(ident, dialect)?,
+            Expr::CompoundIdentifier(idents) => idents
+                .iter()
+                .try_for_each(|ident| check_ident(ident, dialect))?,
             _ => return Err(GuardError("ORDER BY must be an identifier".to_string())),
         }
     }
@@ -195,7 +197,7 @@ fn check_limit(limit: &LimitClause) -> Result<(), GuardError> {
     Ok(())
 }
 
-fn check_select(select: &Select) -> Result<(), GuardError> {
+fn check_select(select: &Select, dialect: SqlDialect) -> Result<(), GuardError> {
     if select.flavor != SelectFlavor::Standard {
         return Err(GuardError("only a standard SELECT is allowed".to_string()));
     }
@@ -230,20 +232,20 @@ fn check_select(select: &Select) -> Result<(), GuardError> {
     if select.from.len() != 1 || !select.from[0].joins.is_empty() {
         return Err(GuardError("exactly one table is allowed".to_string()));
     }
-    check_table(&select.from[0].relation)?;
+    check_table(&select.from[0].relation, dialect)?;
     if select.projection.is_empty() {
         return Err(GuardError("SELECT list is empty".to_string()));
     }
     for item in &select.projection {
-        check_projection(item)?;
+        check_projection(item, dialect)?;
     }
     if let Some(selection) = &select.selection {
-        check_where(selection)?;
+        check_where(selection, dialect)?;
     }
     Ok(())
 }
 
-fn check_table(relation: &TableFactor) -> Result<(), GuardError> {
+fn check_table(relation: &TableFactor, dialect: SqlDialect) -> Result<(), GuardError> {
     let TableFactor::Table {
         name,
         alias: None,
@@ -262,16 +264,18 @@ fn check_table(relation: &TableFactor) -> Result<(), GuardError> {
     if !with_hints.is_empty() || !partitions.is_empty() || !index_hints.is_empty() {
         return Err(GuardError("table hints are not allowed".to_string()));
     }
-    check_object_name(name)
+    check_object_name(name, dialect)
 }
 
-fn check_projection(item: &SelectItem) -> Result<(), GuardError> {
+fn check_projection(item: &SelectItem, dialect: SqlDialect) -> Result<(), GuardError> {
     let SelectItem::UnnamedExpr(expr) = item else {
         return Err(GuardError("SELECT aliases are not allowed".to_string()));
     };
     match expr {
-        Expr::Identifier(ident) => check_ident(ident),
-        Expr::CompoundIdentifier(idents) => idents.iter().try_for_each(check_ident),
+        Expr::Identifier(ident) => check_ident(ident, dialect),
+        Expr::CompoundIdentifier(idents) => idents
+            .iter()
+            .try_for_each(|ident| check_ident(ident, dialect)),
         Expr::Value(value) if is_number(value) => Ok(()),
         Expr::Function(function) if is_count_star(function) => Ok(()),
         _ => Err(GuardError(
@@ -280,15 +284,17 @@ fn check_projection(item: &SelectItem) -> Result<(), GuardError> {
     }
 }
 
-fn check_where(expr: &Expr) -> Result<(), GuardError> {
+fn check_where(expr: &Expr, dialect: SqlDialect) -> Result<(), GuardError> {
     match expr {
-        Expr::Identifier(ident) => check_ident(ident),
-        Expr::CompoundIdentifier(idents) => idents.iter().try_for_each(check_ident),
-        Expr::Nested(inner) => check_where(inner),
+        Expr::Identifier(ident) => check_ident(ident, dialect),
+        Expr::CompoundIdentifier(idents) => idents
+            .iter()
+            .try_for_each(|ident| check_ident(ident, dialect)),
+        Expr::Nested(inner) => check_where(inner, dialect),
         Expr::Value(value) if is_number(value) || is_placeholder(value) => Ok(()),
         Expr::BinaryOp { left, op, right } if is_allowed_operator(op) => {
-            check_where(left)?;
-            check_where(right)
+            check_where(left, dialect)?;
+            check_where(right, dialect)
         }
         Expr::Like {
             negated: false,
@@ -297,8 +303,8 @@ fn check_where(expr: &Expr) -> Result<(), GuardError> {
             pattern,
             escape_char: None,
         } => {
-            check_where(expr)?;
-            check_where(pattern)
+            check_where(expr, dialect)?;
+            check_where(pattern, dialect)
         }
         Expr::Between {
             expr,
@@ -306,22 +312,22 @@ fn check_where(expr: &Expr) -> Result<(), GuardError> {
             low,
             high,
         } => {
-            check_where(expr)?;
-            check_where(low)?;
-            check_where(high)
+            check_where(expr, dialect)?;
+            check_where(low, dialect)?;
+            check_where(high, dialect)
         }
         Expr::InList {
             expr,
             list,
             negated: false,
         } => {
-            check_where(expr)?;
+            check_where(expr, dialect)?;
             for item in list {
-                check_where(item)?;
+                check_where(item, dialect)?;
             }
             Ok(())
         }
-        Expr::IsNull(inner) | Expr::IsNotNull(inner) => check_where(inner),
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => check_where(inner, dialect),
         _ => Err(GuardError("unsupported WHERE expression".to_string())),
     }
 }
@@ -382,23 +388,34 @@ fn is_count_star(function: &Function) -> bool {
     };
     function.name.0.len() == 1
         && ident.value.eq_ignore_ascii_case("count")
-        && check_ident(ident).is_ok()
+        && !ident.value.contains('@')
 }
 
-fn check_object_name(name: &ObjectName) -> Result<(), GuardError> {
+fn check_object_name(name: &ObjectName, dialect: SqlDialect) -> Result<(), GuardError> {
     if name.0.is_empty() {
         return Err(GuardError("missing table name".to_string()));
+    }
+    // `SELECT 1 FROM DUAL` is the only unquoted Oracle table name.
+    if dialect == SqlDialect::Oracle
+        && name.0.len() == 1
+        && name
+            .0
+            .first()
+            .and_then(|part| part.as_ident())
+            .is_some_and(|ident| ident.value.eq_ignore_ascii_case("dual"))
+    {
+        return Ok(());
     }
     for part in &name.0 {
         let Some(ident) = part.as_ident() else {
             return Err(GuardError("table name must be an identifier".to_string()));
         };
-        check_ident(ident)?;
+        check_ident(ident, dialect)?;
     }
     Ok(())
 }
 
-fn check_ident(ident: &Ident) -> Result<(), GuardError> {
+fn check_ident(ident: &Ident, dialect: SqlDialect) -> Result<(), GuardError> {
     if ident.value.contains('@') {
         return Err(GuardError("database links are not allowed".to_string()));
     }
@@ -407,23 +424,33 @@ fn check_ident(ident: &Ident) -> Result<(), GuardError> {
             "sequence references are not allowed".to_string(),
         ));
     }
-    // Unquoted niladic calls (`SYSDATE`, `CURRENT_TIMESTAMP`) are functions, not columns.
-    if ident.quote_style.is_none()
-        && matches!(
-            ident.value.to_ascii_uppercase().as_str(),
-            "SYSDATE"
-                | "CURRENT_DATE"
-                | "CURRENT_TIMESTAMP"
-                | "CURRENT_TIME"
-                | "LOCALTIMESTAMP"
-                | "LOCALTIME"
-                | "USER"
-                | "UID"
-                | "ROWNUM"
-                | "LEVEL"
-        )
-    {
+    if ident.quote_style.is_none() && is_bare_pseudocolumn(ident) {
         return Err(GuardError("function calls are not allowed".to_string()));
     }
+    if dialect == SqlDialect::Oracle && ident.quote_style != Some('"') {
+        return Err(GuardError(
+            "Oracle identifiers must be double-quoted".to_string(),
+        ));
+    }
     Ok(())
+}
+
+fn is_bare_pseudocolumn(ident: &Ident) -> bool {
+    matches!(
+        ident.value.to_ascii_uppercase().as_str(),
+        "SYSDATE"
+            | "SYSTIMESTAMP"
+            | "SESSIONTIMEZONE"
+            | "ORA_ROWSCN"
+            | "CURRENT_DATE"
+            | "CURRENT_TIMESTAMP"
+            | "CURRENT_TIME"
+            | "LOCALTIMESTAMP"
+            | "LOCALTIME"
+            | "USER"
+            | "UID"
+            | "ROWNUM"
+            | "LEVEL"
+            | "F_AUDIT"
+    )
 }

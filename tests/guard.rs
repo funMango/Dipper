@@ -56,6 +56,10 @@ fn rejects_statements_that_are_not_a_single_select() {
         r#"SELECT NEXTVAL FROM "T""#,
         r#"SELECT "SEQ".CURRVAL FROM "DUAL""#,
         r#"SELECT SYSDATE FROM "DUAL""#,
+        r#"SELECT SYSTIMESTAMP FROM "DUAL""#,
+        r#"SELECT SESSIONTIMEZONE FROM "DUAL""#,
+        r#"SELECT ORA_ROWSCN FROM "T""#,
+        r#"SELECT F_AUDIT FROM "T""#,
         r#"SELECT CURRENT_TIMESTAMP FROM "T""#,
         r#"SELECT COUNT(DISTINCT "A") FROM "T""#,
         r#"SELECT COUNT(*) OVER () FROM "T""#,
@@ -73,6 +77,27 @@ fn rejects_statements_that_are_not_a_single_select() {
     for sql in samples {
         reject_both(sql);
     }
+}
+
+#[test]
+fn rejects_unquoted_oracle_identifiers() {
+    let samples = [
+        r#"SELECT A FROM "T""#,
+        r#"SELECT "A" FROM T"#,
+        r#"SELECT "A" FROM "T" WHERE A > :1"#,
+        r#"SELECT "A" FROM "T" ORDER BY A"#,
+        r#"SELECT PKG.F FROM "DUAL""#,
+        r#"SELECT "A" FROM "T" WHERE PKG.F = :1"#,
+        r#"SELECT "A" FROM "T" ORDER BY PKG.F"#,
+        r#"SELECT SYSDATE FROM DUAL"#,
+    ];
+    for sql in samples {
+        reject(sql, SqlDialect::Oracle);
+    }
+    accept(r#"SELECT "SYSDATE" FROM DUAL"#, SqlDialect::Oracle);
+    accept(r#"SELECT "A" FROM "DUAL""#, SqlDialect::Oracle);
+    accept(r#"SELECT COUNT(*) FROM "T""#, SqlDialect::Oracle);
+    accept(r#"SELECT "PKG"."F" FROM "T""#, SqlDialect::Oracle);
 }
 
 #[test]
