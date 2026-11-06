@@ -508,3 +508,44 @@ fn push(issues: &mut Vec<ConfigIssue>, path: impl Into<String>, message: impl In
         message: message.into(),
     });
 }
+
+#[cfg(test)]
+mod password_tests {
+    use super::*;
+
+    #[test]
+    fn substituted_password_is_readable_inside_the_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dipper.toml");
+        std::fs::write(
+            &path,
+            r#"
+[sources.company]
+kind = "oracle"
+connect = "host/${DIPPER_TEST_CONNECT}"
+user = "${DIPPER_TEST_ORA_USER}"
+password = "${DIPPER_TEST_ORA_PASSWORD}"
+"#,
+        )
+        .unwrap();
+        let config = load_with_env(&path, &|key| match key {
+            "DIPPER_TEST_CONNECT" => Some("db.example:1521/SVC".to_string()),
+            "DIPPER_TEST_ORA_USER" => Some("scott".to_string()),
+            "DIPPER_TEST_ORA_PASSWORD" => Some("PR2-loader-secret".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        match config.sources.get("company") {
+            Some(SourceConfig::Oracle {
+                connect,
+                user,
+                password,
+            }) => {
+                assert_eq!(connect, "host/db.example:1521/SVC");
+                assert_eq!(user, "scott");
+                assert_eq!(password.expose(), "PR2-loader-secret");
+            }
+            other => panic!("company: {other:?}"),
+        }
+    }
+}

@@ -16,17 +16,10 @@ impl OracleSource {
     ) -> Result<Self, DipperError> {
         match oracle::Connection::connect(user, password.expose(), connect) {
             Ok(conn) => Ok(Self {
-                name: name.to_string(),
+                name: name.to_owned(),
                 conn,
             }),
-            Err(err) => {
-                let mut text = err.to_string();
-                let secret = password.expose();
-                if !secret.is_empty() {
-                    text = text.replace(secret, "***");
-                }
-                Err(oracle_error_message(name, text))
-            }
+            Err(err) => Err(oracle_error(name, &err, Some(password))),
         }
     }
 }
@@ -44,7 +37,7 @@ impl Source for OracleSource {
         self.conn
             .query_row_as::<i32>("SELECT 1 FROM DUAL", &[])
             .map(|_| ())
-            .map_err(|err| oracle_error_message(&self.name, err.to_string()))
+            .map_err(|err| oracle_error(&self.name, &err, None))
     }
 
     fn select<'a>(&'a self, spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError> {
@@ -53,7 +46,8 @@ impl Source for OracleSource {
     }
 }
 
-fn oracle_error_message(name: &str, text: String) -> DipperError {
+fn oracle_error(name: &str, err: &oracle::Error, secret: Option<&Secret>) -> DipperError {
+    let text = crate::source::redact_driver_message(&err.to_string(), secret.map(Secret::expose));
     let message = if text.contains("DPI-1047") {
         format!("{text}; Oracle Instant Client not found; see docs/ORACLE_SETUP.md")
     } else {

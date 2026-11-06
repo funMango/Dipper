@@ -6,14 +6,17 @@ use serde::de::{self, Deserializer, Visitor};
 use serde::Deserialize;
 
 /// Password held so `Debug` cannot print it. There is no `Display` impl.
-pub struct Secret(String);
+pub struct Secret(#[cfg_attr(not(any(test, feature = "oracle")), allow(dead_code))] String);
 
 impl Secret {
     pub(crate) fn new(value: String) -> Self {
         Self(value)
     }
 
-    pub fn expose(&self) -> &str {
+    /// The default library build has no Oracle driver, so only tests and the
+    /// `oracle` feature read the password.
+    #[cfg_attr(not(any(test, feature = "oracle")), allow(dead_code))]
+    pub(crate) fn expose(&self) -> &str {
         &self.0
     }
 }

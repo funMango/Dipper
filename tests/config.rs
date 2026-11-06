@@ -81,7 +81,9 @@ fn example_loads_and_omitted_fields_use_defaults() {
         }) => {
             assert_eq!(connect, "127.0.0.1:1/NOPE");
             assert_eq!(user, "scott");
-            assert_eq!(password.expose(), "PR2-loader-secret");
+            let rendered = format!("{password:?}");
+            assert_eq!(rendered, "Secret(***)");
+            assert!(!rendered.contains("PR2-loader-secret"));
         }
         other => panic!("company source: {other:?}"),
     }
@@ -183,7 +185,9 @@ password = "${DIPPER_TEST_ORA_PASSWORD}"
         }) => {
             assert_eq!(connect, "host/db.example:1521/SVC");
             assert_eq!(user, "scott");
-            assert_eq!(password.expose(), "PR2-loader-secret");
+            let rendered = format!("{password:?}");
+            assert_eq!(rendered, "Secret(***)");
+            assert!(!rendered.contains("PR2-loader-secret"));
         }
         other => panic!("company: {other:?}"),
     }

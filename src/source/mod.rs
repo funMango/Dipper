@@ -117,3 +117,98 @@ fn failure_reason(err: DipperError) -> String {
         other => other.to_string(),
     }
 }
+
+/// Hide a driver error that contains the password.
+///
+/// A short password can be a substring of a normal Oracle code (`ORA`).
+/// Replacing that substring would show where the secret sat in the text, so
+/// the whole message is dropped and only the first driver code is kept.
+#[cfg_attr(not(any(test, feature = "oracle")), allow(dead_code))]
+pub(crate) fn redact_driver_message(text: &str, secret: Option<&str>) -> String {
+    let Some(secret) = secret.filter(|secret| !secret.is_empty()) else {
+        return text.to_string();
+    };
+    if !text.contains(secret) {
+        return text.to_string();
+    }
+    match first_driver_code(text) {
+        Some(code) => {
+            format!("{code} (driver message hidden because it contained the password)")
+        }
+        None => "driver error (message hidden because it contained the password)".to_string(),
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "oracle")), allow(dead_code))]
+fn first_driver_code(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    for index in 0..bytes.len() {
+        if let Some(code) =
+            code_at(text, index, "ORA-", 5).or_else(|| code_at(text, index, "DPI-", 4))
+        {
+            return Some(code);
+        }
+    }
+    None
+}
+
+#[cfg_attr(not(any(test, feature = "oracle")), allow(dead_code))]
+fn code_at<'a>(text: &'a str, index: usize, prefix: &str, digits: usize) -> Option<&'a str> {
+    let rest = text.get(index..)?;
+    if !rest.starts_with(prefix) {
+        return None;
+    }
+    let end = index + prefix.len() + digits;
+    let code = text.get(index..end)?;
+    if !code.as_bytes()[prefix.len()..]
+        .iter()
+        .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let bounded = text
+        .as_bytes()
+        .get(end)
+        .is_none_or(|byte| !byte.is_ascii_digit());
+    if bounded {
+        Some(code)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_driver_message;
+
+    const ORA_01017: &str = "ORA-01017: invalid username/password; logon denied";
+
+    #[test]
+    fn password_that_is_an_error_prefix_hides_the_whole_message() {
+        let hidden = redact_driver_message(ORA_01017, Some("ORA"));
+        assert_eq!(
+            hidden,
+            "ORA-01017 (driver message hidden because it contained the password)"
+        );
+        assert!(!hidden.contains("***"));
+    }
+
+    #[test]
+    fn password_absent_from_the_message_keeps_the_text() {
+        assert_eq!(redact_driver_message(ORA_01017, Some("zz")), ORA_01017);
+    }
+
+    #[test]
+    fn empty_or_missing_password_keeps_the_text() {
+        assert_eq!(redact_driver_message(ORA_01017, Some("")), ORA_01017);
+        assert_eq!(redact_driver_message(ORA_01017, None), ORA_01017);
+    }
+
+    #[test]
+    fn message_without_a_driver_code_uses_the_fixed_sentence() {
+        assert_eq!(
+            redact_driver_message("logon denied for secret", Some("secret")),
+            "driver error (message hidden because it contained the password)"
+        );
+    }
+}
