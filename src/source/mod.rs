@@ -26,6 +26,8 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Text(String),
+    Date(chrono::NaiveDate),
+    Timestamp(chrono::NaiveDateTime),
 }
 
 #[derive(Debug, Clone, PartialEq)]

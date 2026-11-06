@@ -17,11 +17,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 oracle = { version = "0.6", optional = true }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_path_to_error = "0.1"
+sqlparser = { version = "0.63", features = ["visitor"] }
 thiserror = "2"
 toml = "1"
 tracing = "0.1"

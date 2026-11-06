@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::sql::guard::GuardError;
+
 /// Errors returned by the Dipper library.
 #[derive(Debug, Error)]
 pub enum DipperError {
@@ -37,6 +39,10 @@ pub enum DipperError {
     /// One or more sources failed `dipper check`.
     #[error("check failed: {failed} of {total} sources failed")]
     CheckFailed { failed: usize, total: usize },
+
+    /// SQL was rejected by the AST guard.
+    #[error("{0}")]
+    Guard(#[from] GuardError),
 }
 
 /// One problem found while loading a config file.
@@ -59,7 +65,8 @@ impl DipperError {
             | Self::ConfigRead { .. }
             | Self::Config { .. }
             | Self::Source { .. }
-            | Self::CheckFailed { .. } => 1,
+            | Self::CheckFailed { .. }
+            | Self::Guard(_) => 1,
         }
     }
 }
