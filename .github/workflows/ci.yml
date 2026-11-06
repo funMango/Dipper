@@ -58,6 +58,9 @@ jobs:
           $output = & dumpbin /dependents target\release\dipper.exe | Out-String
           Write-Output $output
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($output.Contains('VCRUNTIME') -or $output.Contains('api-ms-win-crt')) { exit 1 }
+          $lower = $output.ToLowerInvariant()
+          foreach ($bad in @('vcruntime', 'api-ms-win-crt', 'ucrtbase', 'msvcp')) {
+            if ($lower.Contains($bad)) { Write-Output "forbidden CRT dependency: $bad"; exit 1 }
+          }
       - name: Run dipper.exe --version
         run: target\release\dipper.exe --version
