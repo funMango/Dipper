@@ -21,6 +21,14 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Stop when a preflight warning is found.
+    #[arg(long, global = true)]
+    strict: bool,
+
+    /// Print each statement sent to a source on stderr.
+    #[arg(long, global = true)]
+    log_sql: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -58,7 +66,7 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
         Command::Check => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
-            crate::commands::check::run(&cli.config, &mut handle)
+            crate::commands::check::run(&cli.config, cli.strict, cli.log_sql, &mut handle)
         }
         Command::Dip => Err(DipperError::NotImplemented("dip")),
         Command::Tables => Err(DipperError::NotImplemented("tables")),

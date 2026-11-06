@@ -66,11 +66,11 @@ fn example_loads_and_omitted_fields_use_defaults() {
     assert_eq!(config.performance.progress_every_rows, 1_000_000);
 
     match config.sources.get("sample") {
-        Some(SourceConfig::Sqlite { path }) => assert_eq!(path, &dir.path().join("sample.db")),
+        Some(SourceConfig::Sqlite { path, .. }) => assert_eq!(path, &dir.path().join("sample.db")),
         other => panic!("sample source: {other:?}"),
     }
     match config.sources.get("archive") {
-        Some(SourceConfig::Sqlite { path }) => assert_eq!(path, &dir.path().join("archive.db")),
+        Some(SourceConfig::Sqlite { path, .. }) => assert_eq!(path, &dir.path().join("archive.db")),
         other => panic!("archive source: {other:?}"),
     }
     match config.sources.get("company") {
@@ -78,10 +78,13 @@ fn example_loads_and_omitted_fields_use_defaults() {
             connect,
             user,
             password,
+            ..
         }) => {
             assert_eq!(connect, "127.0.0.1:1/NOPE");
             assert_eq!(user, "scott");
-            assert_eq!(password.expose(), "PR2-loader-secret");
+            let rendered = format!("{password:?}");
+            assert_eq!(rendered, "Secret(***)");
+            assert!(!rendered.contains("PR2-loader-secret"));
         }
         other => panic!("company source: {other:?}"),
     }
@@ -138,7 +141,7 @@ columns = ["ORDER_ID"]
     assert_eq!(config.performance.progress_every_rows, 1_000_000);
     assert!(!config.dips[0].count_first);
     match config.sources.get("only") {
-        Some(SourceConfig::Sqlite { path }) => assert_eq!(path, &dir.path().join("only.db")),
+        Some(SourceConfig::Sqlite { path, .. }) => assert_eq!(path, &dir.path().join("only.db")),
         other => panic!("only source: {other:?}"),
     }
 }
@@ -170,7 +173,7 @@ password = "${DIPPER_TEST_ORA_PASSWORD}"
     .unwrap();
 
     match config.sources.get("sample") {
-        Some(SourceConfig::Sqlite { path }) => {
+        Some(SourceConfig::Sqlite { path, .. }) => {
             assert_eq!(path, &dir.path().join("nested/sample.db"));
         }
         other => panic!("sample: {other:?}"),
@@ -180,10 +183,13 @@ password = "${DIPPER_TEST_ORA_PASSWORD}"
             connect,
             user,
             password,
+            ..
         }) => {
             assert_eq!(connect, "host/db.example:1521/SVC");
             assert_eq!(user, "scott");
-            assert_eq!(password.expose(), "PR2-loader-secret");
+            let rendered = format!("{password:?}");
+            assert_eq!(rendered, "Secret(***)");
+            assert!(!rendered.contains("PR2-loader-secret"));
         }
         other => panic!("company: {other:?}"),
     }
@@ -606,4 +612,168 @@ password = {value}
             "{value} leaked in stdout:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn safety_and_session_fields_default_and_reject_bad_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::write_config(
+        dir.path(),
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1/NOPE"
+user = "scott"
+password = "${DIPPER_TEST_ORA_PASSWORD}"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+"#,
+    );
+    let config = load_with_env(&path, &|key| {
+        (key == "DIPPER_TEST_ORA_PASSWORD").then(|| "secret".to_string())
+    })
+    .unwrap();
+    assert!(!config.strict_readonly);
+    assert_eq!(config.dips[0].key, None);
+    assert_eq!(config.dips[0].paging, dipper::config::Paging::Keyset);
+    match config.sources.get("sample") {
+        Some(SourceConfig::Sqlite {
+            max_session_minutes,
+            ..
+        }) => assert_eq!(*max_session_minutes, 480),
+        other => panic!("{other:?}"),
+    }
+    match config.sources.get("company") {
+        Some(SourceConfig::Oracle {
+            call_timeout_secs,
+            max_session_minutes,
+            ..
+        }) => {
+            assert_eq!(*call_timeout_secs, 300);
+            assert_eq!(*max_session_minutes, 480);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+key = "A B"
+"#,
+        &["dips[0].key", "invalid identifier"],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "SALES.ORDERS"
+columns = ["PKG.F"]
+"#,
+        &["dips[0].columns[0]", "invalid identifier"],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+key = "PKG.F"
+"#,
+        &["dips[0].key", "invalid identifier"],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+
+[[dips.filters]]
+column = "PKG.F"
+op = "eq"
+value = "x"
+"#,
+        &["dips[0].filters[0].column", "invalid identifier"],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+paging = "offset"
+"#,
+        &["dips[0].paging", "offset"],
+    );
+    assert_check_error(
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "c"
+user = "u"
+password = "${DIPPER_TEST_ORA_PASSWORD}"
+call_timeout_secs = 0
+"#,
+        &[
+            "sources.company.call_timeout_secs",
+            "must be greater than 0",
+        ],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+max_session_minutes = 0
+"#,
+        &[
+            "sources.sample.max_session_minutes",
+            "must be greater than 0",
+        ],
+    );
+    assert_check_error(
+        r#"
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+call_timeout_secs = 300
+"#,
+        &["sources.sample", "call_timeout_secs"],
+    );
 }

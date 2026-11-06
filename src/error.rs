@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::sql::guard::GuardError;
+
 /// Errors returned by the Dipper library.
 #[derive(Debug, Error)]
 pub enum DipperError {
@@ -37,6 +39,33 @@ pub enum DipperError {
     /// One or more sources failed `dipper check`.
     #[error("check failed: {failed} of {total} sources failed")]
     CheckFailed { failed: usize, total: usize },
+
+    /// SQL was rejected by the AST guard.
+    #[error("{0}")]
+    Guard(#[from] GuardError),
+
+    /// Another source session is already open in this process.
+    #[error("{0}")]
+    SourceBusy(&'static str),
+
+    /// Preflight refused to read a dip.
+    #[error("refused: {dip}: {message}")]
+    Refused {
+        source_name: String,
+        dip: String,
+        message: String,
+    },
+
+    /// The source session outlived its deadline.
+    #[error("{source_name}: session deadline exceeded")]
+    DeadlineExceeded { source_name: String },
+
+    /// Strict mode stopped on preflight warnings.
+    #[error("{source_name}: strict: {warnings} warning(s)")]
+    StrictReadonly {
+        source_name: String,
+        warnings: usize,
+    },
 }
 
 /// One problem found while loading a config file.
@@ -59,7 +88,12 @@ impl DipperError {
             | Self::ConfigRead { .. }
             | Self::Config { .. }
             | Self::Source { .. }
-            | Self::CheckFailed { .. } => 1,
+            | Self::CheckFailed { .. }
+            | Self::Guard(_)
+            | Self::SourceBusy(_)
+            | Self::Refused { .. }
+            | Self::DeadlineExceeded { .. }
+            | Self::StrictReadonly { .. } => 1,
         }
     }
 }

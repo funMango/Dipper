@@ -20,6 +20,20 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+      - name: No commit paths in src
+        shell: bash
+        run: |
+          if grep -rnE '\.commit[[:space:]]*\(|set_autocommit[[:space:]]*\([[:space:]]*true|"[^"]*COMMIT' src/; then
+            echo "commit path found in src/"; exit 1
+          fi
+      - name: Driver SQL calls only in source executors
+        shell: bash
+        run: |
+          hits="$(grep -rnE '\.(execute|execute_batch|execute_named|query|query_row|query_row_as|query_as|query_map|prepare|prepare_cached|statement|pragma_update|pragma_query_value)[[:space:]]*\(' src/ || true)"
+          echo "$hits"
+          if echo "$hits" | grep -vE '^src/source/(sqlite|oracle)\.rs:' | grep -q .; then
+            echo "driver SQL call outside src/source/{sqlite,oracle}.rs"; exit 1
+          fi
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - name: Default build has no Oracle dependency
@@ -58,6 +72,9 @@ jobs:
           $output = & dumpbin /dependents target\release\dipper.exe | Out-String
           Write-Output $output
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($output.Contains('VCRUNTIME') -or $output.Contains('api-ms-win-crt')) { exit 1 }
+          $lower = $output.ToLowerInvariant()
+          foreach ($bad in @('vcruntime', 'api-ms-win-crt', 'ucrtbase', 'msvcp')) {
+            if ($lower.Contains($bad)) { Write-Output "forbidden CRT dependency: $bad"; exit 1 }
+          }
       - name: Run dipper.exe --version
         run: target\release\dipper.exe --version
