@@ -106,13 +106,7 @@ fn open_oracle(
     password: &crate::config::Secret,
     opts: &OpenOptions,
 ) -> Result<Opened, DipperError> {
-    let _ = opts;
-    Ok(Opened {
-        source: Box::new(oracle::OracleSource::connect(
-            name, connect, user, password,
-        )?),
-        findings: Vec::new(),
-    })
+    oracle::OracleSource::connect(name, connect, user, password, opts)
 }
 
 #[cfg(not(feature = "oracle"))]
