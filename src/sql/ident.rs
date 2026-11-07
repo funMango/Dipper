@@ -24,10 +24,13 @@ pub fn validate_dip_name(s: &str) -> Result<(), String> {
     if chars.any(|c| !(c.is_ascii_alphanumeric() || c == '_')) {
         return Err("invalid dip name".to_string());
     }
-    if s.starts_with("_dipper") {
+    // DuckDB folds unquoted identifiers, so the reserved forms must match
+    // `_dipper*` and `*__staging` regardless of ASCII case.
+    let folded = s.to_ascii_lowercase();
+    if folded.starts_with("_dipper") {
         return Err("invalid dip name: must not start with _dipper".to_string());
     }
-    if s.ends_with("__staging") {
+    if folded.ends_with("__staging") {
         return Err("invalid dip name: must not end with __staging".to_string());
     }
     Ok(())
@@ -89,6 +92,10 @@ mod tests {
         assert!(validate_dip_name("_dipper").is_err());
         assert!(validate_dip_name("_dipper_runs").is_err());
         assert!(validate_dip_name("orders__staging").is_err());
+        assert!(validate_dip_name("_DIPPER_RUNS").is_err());
+        assert!(validate_dip_name("_Dipper_x").is_err());
+        assert!(validate_dip_name("ORDERS__STAGING").is_err());
+        assert!(validate_dip_name("orders__Staging").is_err());
         assert!(validate_dip_name("1A").is_err());
         assert!(validate_dip_name("A-B").is_err());
     }

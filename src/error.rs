@@ -66,6 +66,18 @@ pub enum DipperError {
         source_name: String,
         warnings: usize,
     },
+
+    /// The local DuckDB store could not be opened or updated.
+    #[error("store: {message}")]
+    Store { message: String },
+
+    /// One or more dips failed.
+    #[error("dip failed: {failed} of {total} dips failed")]
+    DipFailed { failed: usize, total: usize },
+
+    /// The user named a dip that is not in the config.
+    #[error("unknown dip: {0}")]
+    UnknownDip(String),
 }
 
 /// One problem found while loading a config file.
@@ -83,7 +95,7 @@ impl DipperError {
     /// 종료코드 규약: 0 성공, 1 설정·실행 오류, 2 사용법 오류·미구현.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::NotImplemented(_) => 2,
+            Self::NotImplemented(_) | Self::UnknownDip(_) => 2,
             Self::ConfigNotFound(_)
             | Self::ConfigRead { .. }
             | Self::Config { .. }
@@ -93,7 +105,9 @@ impl DipperError {
             | Self::SourceBusy(_)
             | Self::Refused { .. }
             | Self::DeadlineExceeded { .. }
-            | Self::StrictReadonly { .. } => 1,
+            | Self::StrictReadonly { .. }
+            | Self::Store { .. }
+            | Self::DipFailed { .. } => 1,
         }
     }
 }
