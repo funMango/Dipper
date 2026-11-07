@@ -328,9 +328,14 @@ fn a_second_run_replaces_rows_and_clears_staging() {
             .unwrap();
         assert_eq!(count, 2, "{dip}");
     }
-    assert!(!table_names(&store)
-        .iter()
-        .any(|name| name.ends_with("__staging")));
+    let staging: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND table_name LIKE '%\\_\\_staging' ESCAPE '\\'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(staging, 0);
 }
 
 #[test]
