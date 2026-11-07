@@ -967,6 +967,119 @@ columns = ["ORDER_ID"]
 }
 
 #[test]
+fn reserved_names_and_case_duplicates_do_not_touch_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    common::make_sqlite(dir.path(), "source.db", &["ORDERS"]);
+    let config = common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+"#,
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .arg("dip")
+        .assert()
+        .code(0);
+    let store = store_path(dir.path());
+    let before = common::sha256_file(&store);
+    let runs_before = count_and_sum(&store, "_dipper_runs", "rows");
+
+    for (name, message) in [
+        ("_DIPPER_RUNS", "must not start with _dipper"),
+        ("_Dipper_x", "must not start with _dipper"),
+        ("ORDERS__STAGING", "must not end with __staging"),
+        ("orders__Staging", "must not end with __staging"),
+    ] {
+        common::write_config(
+            dir.path(),
+            &format!(
+                r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "{name}"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+"#
+            ),
+        );
+        for command in ["check", "dip"] {
+            let output = common::dipper()
+                .current_dir(dir.path())
+                .args(["--config"])
+                .arg(&config)
+                .arg(command)
+                .assert()
+                .code(1)
+                .get_output()
+                .clone();
+            let (_, stderr) = texts(&output);
+            assert!(
+                stderr.contains("dips[0].name") && stderr.contains(message),
+                "{command} {name}: {stderr}"
+            );
+            assert_eq!(common::sha256_file(&store), before, "{command} {name}");
+        }
+    }
+
+    common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "orders"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+[[dips]]
+name = "ORDERS"
+source = "sample"
+table = "ORDERS"
+columns = ["ORDER_ID"]
+"#,
+    );
+    for command in ["check", "dip"] {
+        let output = common::dipper()
+            .current_dir(dir.path())
+            .args(["--config"])
+            .arg(&config)
+            .arg(command)
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+        let (_, stderr) = texts(&output);
+        assert!(
+            stderr.contains("dips[1].name") && stderr.contains("duplicate dip name"),
+            "{command}: {stderr}"
+        );
+        assert_eq!(common::sha256_file(&store), before, "{command}");
+    }
+    assert_eq!(count_and_sum(&store, "_dipper_runs", "rows"), runs_before);
+    assert!(table_names(&store).iter().any(|name| name == "orders"));
+    assert!(!table_names(&store)
+        .iter()
+        .any(|name| name == "_DIPPER_RUNS"));
+}
+
+#[test]
 fn missing_config_and_unopenable_store_exit_one() {
     let dir = tempfile::tempdir().unwrap();
     let output = common::dipper()
