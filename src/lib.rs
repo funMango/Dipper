@@ -6,6 +6,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod pipeline;
 pub mod source;
 pub mod sql;
 pub mod store;
