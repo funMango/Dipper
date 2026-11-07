@@ -39,7 +39,13 @@ pub enum Command {
     /// Check that configured sources are reachable.
     Check,
     /// Copy selected data from sources into the local store.
-    Dip,
+    Dip {
+        /// Dip names to run (default: all, in config order).
+        names: Vec<String>,
+        /// Stop at the first failed dip.
+        #[arg(long)]
+        fail_fast: bool,
+    },
     /// List tables in the local store.
     Tables,
     /// Show rows from a local table.
@@ -68,7 +74,18 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
             let mut handle = stdout.lock();
             crate::commands::check::run(&cli.config, cli.strict, cli.log_sql, &mut handle)
         }
-        Command::Dip => Err(DipperError::NotImplemented("dip")),
+        Command::Dip { names, fail_fast } => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            crate::commands::dip::run(
+                &cli.config,
+                &names,
+                fail_fast,
+                cli.strict,
+                cli.log_sql,
+                &mut handle,
+            )
+        }
         Command::Tables => Err(DipperError::NotImplemented("tables")),
         Command::Show => Err(DipperError::NotImplemented("show")),
         Command::Stats => Err(DipperError::NotImplemented("stats")),

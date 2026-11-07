@@ -45,7 +45,7 @@ fn help_lists_subcommands() {
 
 #[test]
 fn subcommands_are_not_implemented() {
-    for name in ["dip", "tables", "show", "stats", "export"] {
+    for name in ["tables", "show", "stats", "export"] {
         Command::cargo_bin("dipper")
             .unwrap()
             .arg(name)
