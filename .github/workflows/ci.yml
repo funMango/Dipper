@@ -20,19 +20,30 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - name: No commit paths in src
+      - name: No commit paths in src (DuckDB store excepted)
         shell: bash
         run: |
-          if grep -rnE '\.commit[[:space:]]*\(|set_autocommit[[:space:]]*\([[:space:]]*true|"[^"]*COMMIT' src/; then
-            echo "commit path found in src/"; exit 1
+          hits="$(grep -rnE '\.commit[[:space:]]*\(|set_autocommit[[:space:]]*\([[:space:]]*true|"[^"]*COMMIT' src/ || true)"
+          echo "$hits"
+          if echo "$hits" | grep -vE '^src/store/' | grep -q .; then
+            echo "commit path found outside src/store/"; exit 1
           fi
-      - name: Driver SQL calls only in source executors
+      - name: Driver SQL calls only in source executors and the DuckDB store
         shell: bash
         run: |
           hits="$(grep -rnE '\.(execute|execute_batch|execute_named|query|query_row|query_row_as|query_as|query_map|prepare|prepare_cached|statement|pragma_update|pragma_query_value)[[:space:]]*\(' src/ || true)"
           echo "$hits"
-          if echo "$hits" | grep -vE '^src/source/(sqlite|oracle)\.rs:' | grep -q .; then
-            echo "driver SQL call outside src/source/{sqlite,oracle}.rs"; exit 1
+          if echo "$hits" | grep -vE '^src/source/(sqlite|oracle)\.rs:|^src/store/' | grep -q .; then
+            echo "driver SQL call outside src/source/{sqlite,oracle}.rs and src/store/"; exit 1
+          fi
+      - name: Source drivers only in src/source, DuckDB only in src/store
+        shell: bash
+        run: |
+          if grep -rnE '\b(rusqlite|oracle)::|^use (rusqlite|oracle)\b' src/ | grep -vE '^src/source/'; then
+            echo "source driver used outside src/source/"; exit 1
+          fi
+          if grep -rnE '\bduckdb::|^use duckdb\b' src/ | grep -vE '^src/store/'; then
+            echo "duckdb used outside src/store/"; exit 1
           fi
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
