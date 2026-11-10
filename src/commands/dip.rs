@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::config::{
     self, apply_period, describe_window, parse_instant, resolve_period, rows_exceed_preview,
-    MAX_PREVIEW_ROWS,
+    AppliedPeriod, Filter, FilterOp, MAX_PREVIEW_ROWS,
 };
 use crate::error::DipperError;
 use crate::pipeline::{self, progress, spec_for, DefaultOpener, RunOptions};
@@ -46,16 +46,16 @@ pub fn run(
             parse_instant(&request.to).map_err(dip_err)?,
         )
         .map_err(dip_err)?;
-        let mut prepared = Vec::with_capacity(selected.len());
+        let mut prepared: Vec<AppliedPeriod> = Vec::with_capacity(selected.len());
         for dip in &selected {
             prepared.push(apply_period(dip, &request.time_column, &window).map_err(dip_err)?);
         }
         let store = Store::open(&config.store, &config.performance)?;
         if !period.replace_table {
             let mut existing = Vec::new();
-            for dip in &prepared {
-                if store.table_exists(&dip.name)? {
-                    existing.push(dip.name.clone());
+            for applied in &prepared {
+                if store.table_exists(&applied.dip.name)? {
+                    existing.push(applied.dip.name.clone());
                 }
             }
             if !existing.is_empty() {
@@ -65,7 +65,11 @@ pub fn run(
                 )));
             }
         }
-        for dip in &prepared {
+        for applied in &prepared {
+            note_overridden_filters(&applied.dip.name, &request.time_column, &applied.ignored)?;
+        }
+        for applied in &prepared {
+            let dip = &applied.dip;
             let count = preview_count(&config, dip, strict, log.clone())?;
             writeln!(
                 std::io::stderr(),
@@ -83,7 +87,7 @@ pub fn run(
         }
         confirm_period(period.yes)?;
         drop(store);
-        prepared
+        prepared.into_iter().map(|applied| applied.dip).collect()
     } else {
         Vec::new()
     };
@@ -201,6 +205,51 @@ fn block_reason(findings: &[crate::source::Finding], strict: bool) -> Option<Str
         }
     }
     None
+}
+
+fn note_overridden_filters(
+    dip_name: &str,
+    time_column: &str,
+    ignored: &[Filter],
+) -> Result<(), DipperError> {
+    if ignored.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        std::io::stderr(),
+        "note: {dip_name}: --from/--to overrides config filters on time column {time_column} for this run; the config file was not changed"
+    )
+    .map_err(|err| dip_err(err.to_string()))?;
+    for filter in ignored {
+        let value = match &filter.value {
+            Some(value) => value.to_string(),
+            None => "-".to_string(),
+        };
+        writeln!(
+            std::io::stderr(),
+            "ignored filter: {} {} {value}",
+            filter.column,
+            filter_op_name(filter.op)
+        )
+        .map_err(|err| dip_err(err.to_string()))?;
+    }
+    Ok(())
+}
+
+fn filter_op_name(op: FilterOp) -> &'static str {
+    match op {
+        FilterOp::Eq => "eq",
+        FilterOp::Ne => "ne",
+        FilterOp::In => "in",
+        FilterOp::Gt => "gt",
+        FilterOp::Gte => "gte",
+        FilterOp::Lt => "lt",
+        FilterOp::Lte => "lte",
+        FilterOp::Between => "between",
+        FilterOp::Like => "like",
+        FilterOp::IsNull => "is_null",
+        FilterOp::NotNull => "not_null",
+    }
 }
 
 fn confirm_period(yes: bool) -> Result<(), DipperError> {
