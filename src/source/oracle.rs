@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::NaiveDateTime;
+use chrono::{Datelike, NaiveDateTime, Timelike};
 
 use crate::config::Secret;
 use crate::error::DipperError;
@@ -164,7 +164,10 @@ impl Executor for OracleExec {
                 message: "prepared statement is not a SELECT".to_owned(),
             });
         }
-        let owned = bind_values(binds);
+        let owned = bind_values(binds).map_err(|message| DipperError::Source {
+            source_name: self.name.clone(),
+            message,
+        })?;
         let params: Vec<&dyn oracle::sql_type::ToSql> =
             owned.iter().map(|value| value.as_ref()).collect();
         let rows: oracle::ResultSet<'static, oracle::Row> = statement
@@ -197,22 +200,74 @@ impl Executor for OracleExec {
     }
 }
 
-fn bind_values(binds: &[Value]) -> Vec<Box<dyn oracle::sql_type::ToSql>> {
+/// One bound parameter. Dates and timestamps stay native so Oracle does not
+/// parse them with `NLS_DATE_FORMAT`.
+enum Bound {
+    Null,
+    Int(i64),
+    Float(f64),
+    Text(String),
+    Timestamp(oracle::sql_type::Timestamp),
+}
+
+impl oracle::sql_type::ToSql for Bound {
+    fn oratype(&self, conn: &oracle::Connection) -> oracle::Result<oracle::sql_type::OracleType> {
+        match self {
+            Bound::Null => None::<i64>.oratype(conn),
+            Bound::Int(value) => value.oratype(conn),
+            Bound::Float(value) => value.oratype(conn),
+            Bound::Text(value) => value.oratype(conn),
+            // Default `Timestamp` oratype is `TIMESTAMP WITH TIME ZONE`. A naive
+            // wall-clock value must stay `TIMESTAMP` so a DATE comparison does
+            // not shift through the session time zone.
+            Bound::Timestamp(_) => Ok(oracle::sql_type::OracleType::Timestamp(9)),
+        }
+    }
+
+    fn to_sql(&self, val: &mut oracle::SqlValue<'_>) -> oracle::Result<()> {
+        match self {
+            Bound::Null => None::<i64>.to_sql(val),
+            Bound::Int(value) => value.to_sql(val),
+            Bound::Float(value) => value.to_sql(val),
+            Bound::Text(value) => value.to_sql(val),
+            Bound::Timestamp(value) => value.to_sql(val),
+        }
+    }
+}
+
+fn bind_values(binds: &[Value]) -> Result<Vec<Box<dyn oracle::sql_type::ToSql>>, String> {
     binds
         .iter()
-        .map(|value| -> Box<dyn oracle::sql_type::ToSql> {
-            match value {
-                Value::Null => Box::new(None::<i64>),
-                Value::Int(value) => Box::new(*value),
-                Value::Float(value) => Box::new(*value),
-                Value::Text(value) => Box::new(value.clone()),
-                Value::Date(value) => Box::new(format!("{}", value.format("%Y-%m-%d"))),
-                Value::Timestamp(value) => {
-                    Box::new(format!("{}", value.format("%Y-%m-%d %H:%M:%S%.f")))
-                }
-            }
+        .map(|value| {
+            bind_value(value).map(|bound| Box::new(bound) as Box<dyn oracle::sql_type::ToSql>)
         })
         .collect()
+}
+
+fn bind_value(value: &Value) -> Result<Bound, String> {
+    let bound = match value {
+        Value::Null => Bound::Null,
+        Value::Int(value) => Bound::Int(*value),
+        Value::Float(value) => Bound::Float(*value),
+        Value::Text(value) => Bound::Text(value.clone()),
+        Value::Date(value) => Bound::Timestamp(
+            oracle::sql_type::Timestamp::new(value.year(), value.month(), value.day(), 0, 0, 0, 0)
+                .map_err(|err| err.to_string())?,
+        ),
+        Value::Timestamp(value) => Bound::Timestamp(
+            oracle::sql_type::Timestamp::new(
+                value.year(),
+                value.month(),
+                value.day(),
+                value.hour(),
+                value.minute(),
+                value.second(),
+                value.nanosecond(),
+            )
+            .map_err(|err| err.to_string())?,
+        ),
+    };
+    Ok(bound)
 }
 
 fn read_cell(
@@ -315,14 +370,12 @@ impl Source for OracleSource {
     fn count(&self, spec: &SelectSpec) -> Result<u64, DipperError> {
         let (query, binds) = build::count(SqlDialect::Oracle, spec)?;
         let rows = self.session.read_all(&query, &binds)?;
-        match rows.first().and_then(|row| row.first()) {
-            Some(Value::Int(value)) if *value >= 0 => Ok(*value as u64),
-            Some(Value::Null) | None => Ok(0),
-            Some(_) => Err(DipperError::Source {
+        count_from_value(rows.first().and_then(|row| row.first())).map_err(|message| {
+            DipperError::Source {
                 source_name: self.name().to_owned(),
-                message: "COUNT(*) returned an unexpected value".to_owned(),
-            }),
-        }
+                message,
+            }
+        })
     }
 
     fn select<'a>(&'a self, spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError> {
@@ -351,6 +404,41 @@ impl Source for OracleSource {
     }
 }
 
+/// Turn one `COUNT(*)` cell into a row count.
+///
+/// Unconstrained Oracle `NUMBER` arrives as [`Value::Text`]. Whole floats are
+/// accepted. Anything else keeps the value in the error.
+fn count_from_value(value: Option<&Value>) -> Result<u64, String> {
+    match value {
+        Some(Value::Int(number)) if *number >= 0 => Ok(*number as u64),
+        Some(Value::Text(text)) => parse_count_text(text)
+            .ok_or_else(|| format!("COUNT(*) returned an unexpected value: {value:?}")),
+        Some(Value::Float(number)) => unsigned_whole_float(*number)
+            .ok_or_else(|| format!("COUNT(*) returned an unexpected value: {value:?}")),
+        Some(Value::Null) | None => Ok(0),
+        Some(_) => Err(format!("COUNT(*) returned an unexpected value: {value:?}")),
+    }
+}
+
+fn parse_count_text(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+fn unsigned_whole_float(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+        return None;
+    }
+    let whole = value as u64;
+    if whole as f64 == value {
+        Some(whole)
+    } else {
+        None
+    }
+}
+
 fn oracle_error(name: &str, err: &oracle::Error, secret: Option<&Secret>) -> DipperError {
     let text = crate::source::redact_driver_message(&err.to_string(), secret.map(Secret::expose));
     let message = if text.contains("DPI-1047") {
@@ -361,5 +449,66 @@ fn oracle_error(name: &str, err: &oracle::Error, secret: Option<&Secret>) -> Dip
     DipperError::Source {
         source_name: name.to_owned(),
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn count_accepts_text_whole_floats_and_ints() {
+        assert_eq!(
+            count_from_value(Some(&Value::Text("285".into()))).unwrap(),
+            285
+        );
+        assert_eq!(count_from_value(Some(&Value::Text("0".into()))).unwrap(), 0);
+        assert_eq!(count_from_value(Some(&Value::Float(285.0))).unwrap(), 285);
+        assert_eq!(count_from_value(Some(&Value::Int(285))).unwrap(), 285);
+        assert_eq!(count_from_value(Some(&Value::Null)).unwrap(), 0);
+        assert_eq!(count_from_value(None).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_rejects_non_integers_and_shows_the_value() {
+        for value in [
+            Value::Text("x".into()),
+            Value::Int(-1),
+            Value::Float(-1.0),
+            Value::Float(285.5),
+        ] {
+            let err = count_from_value(Some(&value)).unwrap_err();
+            assert!(
+                err.contains(&format!("{value:?}")),
+                "error {err} should include {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn date_and_timestamp_binds_are_native_timestamps() {
+        let date = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let timestamp = date.and_hms_opt(9, 0, 0).unwrap();
+        for value in [Value::Date(date), Value::Timestamp(timestamp)] {
+            let bound = bind_value(&value).unwrap();
+            assert!(
+                !matches!(bound, Bound::Text(_)),
+                "{value:?} was bound as a character string"
+            );
+            let Bound::Timestamp(stamp) = bound else {
+                panic!("{value:?} was not a native timestamp");
+            };
+            assert!(!stamp.with_tz(), "{value:?} included a time zone");
+            assert_eq!(stamp.year(), 2026);
+            assert_eq!(stamp.month(), 11);
+            assert_eq!(stamp.day(), 1);
+            let hour = if matches!(value, Value::Date(_)) {
+                0
+            } else {
+                9
+            };
+            assert_eq!(stamp.hour(), hour);
+        }
     }
 }
