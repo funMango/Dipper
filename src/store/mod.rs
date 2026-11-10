@@ -54,6 +54,23 @@ impl Store {
         &self.conn
     }
 
+    /// Whether `name` is a user table in `main`. Run history and staging names are not targets.
+    pub fn table_exists(&self, name: &str) -> Result<bool, DipperError> {
+        let folded = name.to_ascii_lowercase();
+        if folded == "_dipper_runs" || folded.ends_with("__staging") {
+            return Ok(false);
+        }
+        let count: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND lower(table_name) = ?",
+                [folded],
+                |row| row.get(0),
+            )
+            .map_err(store_err)?;
+        Ok(count > 0)
+    }
+
     /// Start a load into `<table>__staging`, dropping a previous leftover of that name first.
     pub fn begin_load(&self, table: &str) -> Result<TableLoad<'_>, DipperError> {
         let staging = format!("{table}__staging");

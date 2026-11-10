@@ -1,13 +1,25 @@
 //! `dipper dip` loads selected dips and prints the summary table.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-use crate::config::{self};
+use crate::config::{
+    self, apply_period, describe_window, parse_instant, resolve_period, rows_exceed_preview,
+    MAX_PREVIEW_ROWS,
+};
 use crate::error::DipperError;
-use crate::pipeline::{self, progress, DefaultOpener, RunOptions};
-use crate::source::SqlLogSink;
+use crate::pipeline::{self, progress, spec_for, DefaultOpener, RunOptions};
+use crate::source::{Level, OpenOptions, SqlLogSink};
 use crate::store::Store;
+
+/// Optional period bounds for one `dipper dip` invocation.
+pub struct PeriodCli {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub time_column: Option<String>,
+    pub yes: bool,
+    pub replace_table: bool,
+}
 
 pub fn run(
     config_path: &Path,
@@ -15,36 +27,215 @@ pub fn run(
     fail_fast: bool,
     strict: bool,
     log_sql: bool,
+    period: PeriodCli,
     out: &mut dyn Write,
 ) -> Result<(), DipperError> {
+    let request = period_request(&period)?;
     let config = config::load(config_path)?;
-    let dips = pipeline::select_dips(&config, names)?;
+    let selected = pipeline::select_dips(&config, names)?;
+    let strict = strict || config.strict_readonly;
+    let log = if log_sql {
+        SqlLogSink::Stderr
+    } else {
+        SqlLogSink::Off
+    };
+
+    let dips: Vec<crate::config::Dip> = if let Some(request) = request {
+        let window = resolve_period(
+            parse_instant(&request.from).map_err(dip_err)?,
+            parse_instant(&request.to).map_err(dip_err)?,
+        )
+        .map_err(dip_err)?;
+        let mut prepared = Vec::with_capacity(selected.len());
+        for dip in &selected {
+            prepared.push(apply_period(dip, &request.time_column, &window).map_err(dip_err)?);
+        }
+        let store = Store::open(&config.store, &config.performance)?;
+        if !period.replace_table {
+            let mut existing = Vec::new();
+            for dip in &prepared {
+                if store.table_exists(&dip.name)? {
+                    existing.push(dip.name.clone());
+                }
+            }
+            if !existing.is_empty() {
+                return Err(dip_err(format!(
+                    "local table(s) already exist ({}). A period load replaces the whole table and drops existing rows; it does not accumulate periods (that is PR6). Pass --replace-table to replace them. --yes does not bypass this check.",
+                    existing.join(", ")
+                )));
+            }
+        }
+        for dip in &prepared {
+            let count = preview_count(&config, dip, strict, log.clone())?;
+            writeln!(
+                std::io::stderr(),
+                "preview: {}: {}, count {count}",
+                dip.name,
+                describe_window(&request.time_column, &window)
+            )
+            .map_err(|err| dip_err(err.to_string()))?;
+            if rows_exceed_preview(count, MAX_PREVIEW_ROWS) {
+                return Err(dip_err(format!(
+                    "{}: preview count {count} exceeds {MAX_PREVIEW_ROWS}; nothing was loaded",
+                    dip.name
+                )));
+            }
+        }
+        confirm_period(period.yes)?;
+        drop(store);
+        prepared
+    } else {
+        Vec::new()
+    };
+
     let store = Store::open(&config.store, &config.performance)?;
     let opts = RunOptions {
         fail_fast,
-        strict: strict || config.strict_readonly,
-        log: if log_sql {
-            SqlLogSink::Stderr
-        } else {
-            SqlLogSink::Off
-        },
+        strict,
+        log,
     };
     let mut progress = progress::for_stderr(config.performance.progress_every_rows);
     let mut stderr = std::io::stderr();
-    let report = pipeline::run(
-        &config,
-        &dips,
-        &store,
-        &opts,
-        &DefaultOpener,
-        progress.as_mut(),
-        &mut stderr,
-    );
+    let report = if dips.is_empty() && request_was_empty(&period) {
+        pipeline::run(
+            &config,
+            &selected,
+            &store,
+            &opts,
+            &DefaultOpener,
+            progress.as_mut(),
+            &mut stderr,
+        )
+    } else {
+        let refs: Vec<&crate::config::Dip> = dips.iter().collect();
+        pipeline::run(
+            &config,
+            &refs,
+            &store,
+            &opts,
+            &DefaultOpener,
+            progress.as_mut(),
+            &mut stderr,
+        )
+    };
+    write_report(out, &report)
+}
+
+fn request_was_empty(period: &PeriodCli) -> bool {
+    period.from.is_none() && period.to.is_none()
+}
+
+struct PeriodRequest {
+    from: String,
+    to: String,
+    time_column: String,
+}
+
+fn period_request(period: &PeriodCli) -> Result<Option<PeriodRequest>, DipperError> {
+    match (
+        period.from.as_deref(),
+        period.to.as_deref(),
+        period.time_column.as_deref(),
+        period.replace_table,
+    ) {
+        (None, None, None, false) => Ok(None),
+        (Some(from), Some(to), Some(column), _) => Ok(Some(PeriodRequest {
+            from: from.to_string(),
+            to: to.to_string(),
+            time_column: column.to_string(),
+        })),
+        (None, None, _, true) => Err(dip_err("--replace-table requires --from and --to")),
+        (None, None, Some(_), false) => Err(dip_err("--time-column requires --from and --to")),
+        _ => Err(dip_err(
+            "--from, --to, and --time-column must be set together",
+        )),
+    }
+}
+
+fn preview_count(
+    config: &crate::config::Config,
+    dip: &crate::config::Dip,
+    strict: bool,
+    log: SqlLogSink,
+) -> Result<u64, DipperError> {
+    let source_cfg = config
+        .sources
+        .get(&dip.source)
+        .ok_or_else(|| dip_err(format!("unknown source: {}", dip.source)))?;
+    let opened = crate::source::open(
+        &dip.source,
+        source_cfg,
+        &OpenOptions {
+            strict,
+            log,
+            action: format!("dip:{}", dip.name),
+        },
+    )?;
+    let spec = spec_for(config, dip);
+    let mut findings = opened.findings.clone();
+    let report = opened.source.preflight(&dip.name, &spec)?;
+    findings.extend(report.findings);
+    if let Some(reason) = block_reason(&findings, strict) {
+        drop(opened);
+        return Err(dip_err(format!("{}: {reason}", dip.name)));
+    }
+    let count = opened.source.count(&spec)?;
+    drop(opened);
+    Ok(count)
+}
+
+fn block_reason(findings: &[crate::source::Finding], strict: bool) -> Option<String> {
+    if let Some(finding) = findings
+        .iter()
+        .find(|finding| finding.level == Level::Refuse)
+    {
+        return Some(format!("refused: {}", finding.message));
+    }
+    if strict {
+        let warnings = findings
+            .iter()
+            .filter(|finding| finding.level == Level::Warn)
+            .count();
+        if warnings > 0 {
+            return Some(format!("strict: {warnings} warning(s)"));
+        }
+    }
+    None
+}
+
+fn confirm_period(yes: bool) -> Result<(), DipperError> {
+    if yes {
+        return Ok(());
+    }
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        return Err(dip_err(
+            "period load needs confirmation; rerun with --yes (stdin is not a terminal)",
+        ));
+    }
+    eprint!("Proceed? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|err| dip_err(err.to_string()))?;
+    if accepts_confirmation(&line) {
+        Ok(())
+    } else {
+        Err(dip_err("period load cancelled"))
+    }
+}
+
+pub(crate) fn accepts_confirmation(line: &str) -> bool {
+    let answer = line.trim();
+    answer == "y" || answer == "Y"
+}
+
+fn write_report(out: &mut dyn Write, report: &pipeline::RunReport) -> Result<(), DipperError> {
     if report.outcomes.is_empty() && report.not_run.is_empty() {
         write_line(out, "0 of 0 dips OK")?;
         return Ok(());
     }
-
     let mut table = comfy_table::Table::new();
     table.load_style(comfy_table::presets::ASCII_FULL);
     table.set_header(vec!["dip", "source", "rows", "seconds", "status", "error"]);
@@ -98,4 +289,25 @@ fn write_line(out: &mut dyn Write, line: &str) -> Result<(), DipperError> {
         source_name: "stdout".to_string(),
         message: err.to_string(),
     })
+}
+
+fn dip_err(message: impl Into<String>) -> DipperError {
+    DipperError::Source {
+        source_name: "dip".to_string(),
+        message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accepts_confirmation;
+
+    #[test]
+    fn only_y_confirms_a_period_load() {
+        assert!(accepts_confirmation("y"));
+        assert!(accepts_confirmation("Y\n"));
+        assert!(!accepts_confirmation("n"));
+        assert!(!accepts_confirmation(""));
+        assert!(!accepts_confirmation("yes"));
+    }
 }

@@ -44,6 +44,34 @@ fn help_lists_subcommands() {
 }
 
 #[test]
+fn dip_help_lists_period_flags() {
+    let output = Command::cargo_bin("dipper")
+        .unwrap()
+        .args(["dip", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--from",
+        "--to",
+        "--time-column",
+        "--yes",
+        "--replace-table",
+    ] {
+        assert!(stdout.contains(flag), "missing {flag} in:\n{stdout}");
+    }
+    assert!(
+        stdout.contains("exclusive"),
+        "help should say a timestamp --to is exclusive:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("same timestamp"),
+        "help should say the same timestamp loads that instant:\n{stdout}"
+    );
+}
+
+#[test]
 fn subcommands_are_not_implemented() {
     for name in ["tables", "show", "stats", "export"] {
         Command::cargo_bin("dipper")

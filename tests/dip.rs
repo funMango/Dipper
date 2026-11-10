@@ -1123,3 +1123,328 @@ columns = ["ORDER_ID"]
     let (_, stderr) = texts(&output);
     assert!(stderr.contains("store:"), "{stderr}");
 }
+
+fn events_config(dir: &std::path::Path, filters: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let db = common::make_events_sqlite(dir, "source.db");
+    let config = common::write_config(
+        dir,
+        &format!(
+            r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "events"
+source = "sample"
+table = "EVENTS"
+columns = ["ID", "TS"]
+{filters}
+"#
+        ),
+    );
+    (db, config)
+}
+
+fn sqlite_count(db: &std::path::Path, sql: &str) -> i64 {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    conn.query_row(sql, [], |row| row.get(0)).unwrap()
+}
+
+fn sql_lines(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("sql: "))
+        .collect()
+}
+
+#[test]
+fn same_timestamp_loads_only_that_bucket_without_datetime_literals() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS = '2026-08-21 08:00:00'",
+    );
+    assert!(expected > 0, "fixture should contain the 08:00 bucket");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "2026-08-21T08:00:00",
+            "--to",
+            "2026-08-21T08:00:00",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    assert!(stderr.contains("eq"), "stderr should show eq:\n{stderr}");
+    assert_eq!(stdout.lines().last(), Some("1 of 1 dips OK"));
+    let store = store_path(dir.path());
+    assert_eq!(count_and_sum(&store, "events", "ID").0, expected);
+    let logged = sql_lines(&stderr);
+    assert!(!logged.is_empty(), "{stderr}");
+    for sql in &logged {
+        assert!(
+            !sql.contains("2026-08-21") && !sql.contains("08:00:00"),
+            "datetime literal in sql: {sql}"
+        );
+        let allowed =
+            dipper::source::SessionStatement::allowed(dipper::sql::guard::SqlDialect::Sqlite)
+                .iter()
+                .any(|statement| statement.sql() == *sql);
+        let guarded =
+            dipper::sql::guard::GuardedSelect::parse(sql, dipper::sql::guard::SqlDialect::Sqlite)
+                .is_ok();
+        assert!(allowed || guarded, "{sql}");
+    }
+    assert!(
+        logged.iter().any(|sql| sql.contains('?')),
+        "expected a placeholder bind, got {logged:?}"
+    );
+}
+
+#[test]
+fn period_load_matches_source_count_and_guards_existing_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(0);
+    let store = store_path(dir.path());
+    assert_eq!(count_and_sum(&store, "events", "ID").0, expected);
+
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("already exist"), "{stderr}");
+    assert!(stderr.contains("PR6"), "{stderr}");
+    assert_eq!(count_and_sum(&store, "events", "ID").0, expected);
+
+    let replaced = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-22 00:00:00' AND TS < '2026-08-23 00:00:00'",
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260822",
+            "--to",
+            "260822",
+            "--time-column",
+            "TS",
+            "--yes",
+            "--replace-table",
+        ])
+        .assert()
+        .code(0);
+    assert_eq!(count_and_sum(&store, "events", "ID").0, replaced);
+}
+
+#[test]
+fn bad_periods_do_not_create_a_store() {
+    let cases = [
+        vec![
+            "dip",
+            "--from",
+            "260231",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--yes",
+        ],
+        vec!["dip", "--from", "260821", "--time-column", "TS", "--yes"],
+        vec!["dip", "--from", "260821", "--to", "260821", "--yes"],
+        vec![
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260921",
+            "--time-column",
+            "TS",
+            "--yes",
+        ],
+        vec!["dip", "--time-column", "TS"],
+        vec!["dip", "--replace-table"],
+    ];
+    for args in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let (_db, config) = events_config(dir.path(), "");
+        let output = common::dipper()
+            .current_dir(dir.path())
+            .args(["--config"])
+            .arg(&config)
+            .args(&args)
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+        let (_, stderr) = texts(&output);
+        assert!(
+            !dir.path().join(".dipper").exists(),
+            "{args:?} created a store:\n{stderr}"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(
+        dir.path(),
+        r#"filters = [{ column = "TS", op = "eq", value = 2026-08-21T08:00:00 }]"#,
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(1);
+    assert!(!dir.path().join(".dipper").exists());
+}
+
+#[test]
+fn period_without_yes_on_a_pipe_does_not_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("--yes"), "{stderr}");
+    let store = store_path(dir.path());
+    if store.exists() {
+        assert!(!table_names(&store).iter().any(|name| name == "events"));
+        let conn = duckdb::Connection::open(&store).unwrap();
+        let runs: i64 = conn
+            .query_row("SELECT count(*) FROM \"_dipper_runs\"", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(runs, 0);
+    }
+}
+
+#[test]
+fn one_existing_table_refuses_the_whole_period_command() {
+    let dir = tempfile::tempdir().unwrap();
+    common::make_events_sqlite(dir.path(), "source.db");
+    let config = common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "events"
+source = "sample"
+table = "EVENTS"
+columns = ["ID", "TS"]
+[[dips]]
+name = "later"
+source = "sample"
+table = "EVENTS"
+columns = ["ID", "TS"]
+"#,
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["dip", "events"])
+        .assert()
+        .code(0);
+    let store = store_path(dir.path());
+    let before = count_and_sum(&store, "events", "ID").0;
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "events",
+            "later",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(1);
+    assert_eq!(count_and_sum(&store, "events", "ID").0, before);
+    assert!(!table_names(&store).iter().any(|name| name == "later"));
+}
