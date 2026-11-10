@@ -85,6 +85,14 @@ pub(crate) trait Executor: Send {
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError>;
+    /// A fixed catalog statement, such as a SQLite `PRAGMA table_xinfo`.
+    fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+        let _ = sql;
+        Err(DipperError::Source {
+            source_name: "source".to_string(),
+            message: "fixed catalog read is not supported".to_string(),
+        })
+    }
     fn breaker(&self) -> Arc<dyn Breaker>;
     fn close(&self) -> Result<(), DipperError>;
 }
@@ -224,6 +232,22 @@ impl<E: Executor> Session<E> {
 
     pub(crate) fn strict(&self) -> bool {
         self.strict
+    }
+
+    pub(crate) fn read_pragma(&self, table: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+        crate::sql::validate_column_ident(table).map_err(|message| DipperError::Source {
+            source_name: self.source_name.clone(),
+            message,
+        })?;
+        let sql = format!("PRAGMA table_xinfo(\"{table}\")");
+        self.ensure_deadline()?;
+        let txn = ReadOnlyTxn::begin(&self.exec)?;
+        let read = self.exec.read_fixed(&sql);
+        let rolled = txn.finish();
+        match (read, rolled) {
+            (Ok(rows), Ok(())) => Ok(rows),
+            (Err(err), _) | (Ok(_), Err(err)) => Err(err),
+        }
     }
 
     pub(crate) fn read_all(

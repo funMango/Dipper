@@ -6,12 +6,12 @@ use chrono::{Datelike, NaiveDateTime, Timelike};
 use crate::config::Secret;
 use crate::error::DipperError;
 use crate::source::logging::LoggingExecutor;
-use crate::source::preflight::blocks;
+use crate::source::preflight::{blocks, DictQuery, Dictionary};
 use crate::source::session::{Executor, RowCursor, Session, SessionOptions, SessionStatement};
 use crate::source::watchdog::{Breaker, SystemClock};
 use crate::source::{
-    session_deadline, ChunkIter, OpenOptions, Opened, Paging, PreflightReport, SelectSpec, Source,
-    Value,
+    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogTable, ChunkIter, OpenOptions,
+    Opened, Paging, PreflightReport, SelectSpec, Source, Value,
 };
 use crate::sql::build;
 use crate::sql::guard::{GuardedSelect, SqlDialect};
@@ -402,6 +402,120 @@ impl Source for OracleSource {
         };
         Ok(self.session.chunks(plan))
     }
+
+    fn catalog(&self, owner: &str, table: &str) -> Result<CatalogTable, DipperError> {
+        crate::sql::validate_column_ident(owner)
+            .map_err(|message| message_error(self.name(), message))?;
+        crate::sql::validate_column_ident(table)
+            .map_err(|message| message_error(self.name(), message))?;
+        let owner_bind = Value::Text(owner.to_string());
+        let table_bind = Value::Text(table.to_string());
+        let binds = [owner_bind.clone(), table_bind.clone()];
+        let objects = self.session.rows(DictQuery::AllObjects, &binds)?;
+        let kinds: Vec<String> = objects.iter().filter_map(|row| cell_text(row, 0)).collect();
+        let object_type = if kinds.iter().any(|kind| kind == "TABLE") {
+            "TABLE"
+        } else if kinds.iter().any(|kind| kind == "VIEW") {
+            "VIEW"
+        } else if kinds.is_empty() {
+            return Err(message_error(
+                self.name(),
+                format!("object not found: {owner}.{table}"),
+            ));
+        } else {
+            return Err(message_error(
+                self.name(),
+                format!(
+                    "ontology pull supports tables and views, found {}",
+                    kinds.join(", ")
+                ),
+            ));
+        };
+        let column_rows = self.session.rows(DictQuery::AllTabColumns, &binds)?;
+        let mut columns: Vec<(i64, CatalogColumn)> = Vec::with_capacity(column_rows.len());
+        for row in &column_rows {
+            let name = cell_text(row, 0)
+                .ok_or_else(|| message_error(self.name(), "dictionary column has no name"))?;
+            let data_type = cell_text(row, 1).unwrap_or_else(|| "UNKNOWN".to_string());
+            let data_length =
+                cell_i64(row, 2).map_err(|message| message_error(self.name(), message))?;
+            let data_precision =
+                cell_i64(row, 3).map_err(|message| message_error(self.name(), message))?;
+            let data_scale =
+                cell_i64(row, 4).map_err(|message| message_error(self.name(), message))?;
+            let nullable = cell_text(row, 5).as_deref() != Some("N");
+            let column_id = cell_i64(row, 6)
+                .map_err(|message| message_error(self.name(), message))?
+                .unwrap_or(i64::MAX);
+            let virtual_column = cell_text(row, 7).as_deref() == Some("YES");
+            columns.push((
+                column_id,
+                CatalogColumn {
+                    name,
+                    data_type,
+                    data_length,
+                    data_precision,
+                    data_scale,
+                    nullable,
+                    virtual_column,
+                    db_comment: None,
+                },
+            ));
+        }
+        columns.sort_by_key(|(id, _)| *id);
+        let mut columns: Vec<CatalogColumn> =
+            columns.into_iter().map(|(_, column)| column).collect();
+        let comments = self.session.rows(DictQuery::AllColComments, &binds)?;
+        for row in &comments {
+            let Some(name) = cell_text(row, 0) else {
+                continue;
+            };
+            let comment = cell_text(row, 1);
+            if let Some(column) = columns.iter_mut().find(|column| column.name == name) {
+                column.db_comment = comment;
+            }
+        }
+        let table_comment = self
+            .session
+            .rows(DictQuery::AllTabComments, &binds)?
+            .first()
+            .and_then(|row| cell_text(row, 0));
+        let constraints = self.session.rows(
+            DictQuery::AllConstraints,
+            &[owner_bind, table_bind, Value::Text("ENABLED".to_string())],
+        )?;
+        let pk_names: Vec<String> = constraints
+            .iter()
+            .filter(|row| cell_text(row, 1).as_deref() == Some("P"))
+            .filter_map(|row| cell_text(row, 0))
+            .collect();
+        let positions = self
+            .session
+            .rows(DictQuery::AllConsColumnPositions, &binds)?;
+        let mut keyed = Vec::new();
+        for row in &positions {
+            let Some(constraint) = cell_text(row, 0) else {
+                continue;
+            };
+            if !pk_names.iter().any(|name| name == &constraint) {
+                continue;
+            }
+            let Some(name) = cell_text(row, 1) else {
+                continue;
+            };
+            let position = cell_i64(row, 2)
+                .map_err(|message| message_error(self.name(), message))?
+                .unwrap_or(i64::MAX);
+            keyed.push((position, name));
+        }
+        keyed.sort_by_key(|(position, _)| *position);
+        Ok(CatalogTable {
+            object_type: object_type.to_string(),
+            table_comment,
+            primary_key: keyed.into_iter().map(|(_, name)| name).collect(),
+            columns,
+        })
+    }
 }
 
 /// Turn one `COUNT(*)` cell into a row count.
@@ -436,6 +550,13 @@ fn unsigned_whole_float(value: f64) -> Option<u64> {
         Some(whole)
     } else {
         None
+    }
+}
+
+fn message_error(name: &str, message: impl Into<String>) -> DipperError {
+    DipperError::Source {
+        source_name: name.to_string(),
+        message: message.into(),
     }
 }
 
