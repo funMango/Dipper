@@ -104,35 +104,55 @@ pub fn resolve_period(from: PeriodInstant, to: PeriodInstant) -> Result<PeriodWi
     Ok(PeriodWindow::Range { start, end })
 }
 
-pub fn apply_period(dip: &Dip, time_column: &str, window: &PeriodWindow) -> Result<Dip, String> {
+/// One dip after CLI period filters replace same-column config filters.
+pub struct AppliedPeriod {
+    pub dip: Dip,
+    /// Config filters dropped for this run, in config order. The file is unchanged.
+    pub ignored: Vec<Filter>,
+}
+
+pub fn apply_period(
+    dip: &Dip,
+    time_column: &str,
+    window: &PeriodWindow,
+) -> Result<AppliedPeriod, String> {
     validate_column_ident(time_column)?;
-    if dip
-        .filters
-        .iter()
-        .any(|filter| filter.column.eq_ignore_ascii_case(time_column))
-    {
-        return Err(format!("time column {time_column} already has a filter"));
+    let mut filters = Vec::with_capacity(dip.filters.len() + 2);
+    let mut ignored = Vec::new();
+    for filter in &dip.filters {
+        if filter.column.eq_ignore_ascii_case(time_column) {
+            ignored.push(filter.clone());
+        } else {
+            filters.push(filter.clone());
+        }
     }
-    let mut filters = dip.filters.clone();
+    // A matching config filter keeps that file's spelling. Otherwise use the CLI spelling.
+    let column = ignored
+        .first()
+        .map(|filter| filter.column.as_str())
+        .unwrap_or(time_column);
     match window {
         PeriodWindow::Range { start, end } => {
-            filters.push(bound_filter(time_column, FilterOp::Gte, *start));
-            filters.push(bound_filter(time_column, FilterOp::Lt, *end));
+            filters.push(bound_filter(column, FilterOp::Gte, *start));
+            filters.push(bound_filter(column, FilterOp::Lt, *end));
         }
         PeriodWindow::Exact { at } => {
-            filters.push(bound_filter(time_column, FilterOp::Eq, *at));
+            filters.push(bound_filter(column, FilterOp::Eq, *at));
         }
     }
-    Ok(Dip {
-        name: dip.name.clone(),
-        source: dip.source.clone(),
-        table: dip.table.clone(),
-        columns: dip.columns.clone(),
-        filters,
-        limit: dip.limit,
-        count_first: dip.count_first,
-        key: dip.key.clone(),
-        paging: dip.paging,
+    Ok(AppliedPeriod {
+        dip: Dip {
+            name: dip.name.clone(),
+            source: dip.source.clone(),
+            table: dip.table.clone(),
+            columns: dip.columns.clone(),
+            filters,
+            limit: dip.limit,
+            count_first: dip.count_first,
+            key: dip.key.clone(),
+            paging: dip.paging,
+        },
+        ignored,
     })
 }
 
@@ -296,10 +316,12 @@ mod tests {
             parse_instant("260920").unwrap(),
         )
         .unwrap();
-        let dip = apply_period(&sample(Vec::new()), "TOT_DT", &window).unwrap();
-        assert_eq!(dip.filters.len(), 2);
-        assert_eq!(dip.filters[0].op, FilterOp::Gte);
-        assert_eq!(dip.filters[1].op, FilterOp::Lt);
+        let applied = apply_period(&sample(Vec::new()), "TOT_DT", &window).unwrap();
+        assert!(applied.ignored.is_empty());
+        assert_eq!(applied.dip.filters.len(), 2);
+        assert_eq!(applied.dip.filters[0].column, "TOT_DT");
+        assert_eq!(applied.dip.filters[0].op, FilterOp::Gte);
+        assert_eq!(applied.dip.filters[1].op, FilterOp::Lt);
         assert!(describe_window("TOT_DT", &window).contains("gte"));
         assert!(describe_window("TOT_DT", &window).contains("lt"));
 
@@ -308,18 +330,97 @@ mod tests {
             parse_instant("2026-08-21T08:00:00").unwrap(),
         )
         .unwrap();
-        let dip = apply_period(&sample(Vec::new()), "TS", &exact).unwrap();
-        assert_eq!(dip.filters.len(), 1);
-        assert_eq!(dip.filters[0].op, FilterOp::Eq);
+        let applied = apply_period(&sample(Vec::new()), "TS", &exact).unwrap();
+        assert_eq!(applied.dip.filters.len(), 1);
+        assert_eq!(applied.dip.filters[0].column, "TS");
+        assert_eq!(applied.dip.filters[0].op, FilterOp::Eq);
         assert!(describe_window("TS", &exact).contains("eq"));
 
-        let existing = sample(vec![Filter {
+        let existing = sample(vec![
+            Filter {
+                column: "ID".into(),
+                op: FilterOp::Gt,
+                value: Some(toml::Value::Integer(0)),
+            },
+            Filter {
+                column: "TS".into(),
+                op: FilterOp::Eq,
+                value: None,
+            },
+            Filter {
+                column: "ts".into(),
+                op: FilterOp::Lt,
+                value: None,
+            },
+        ]);
+        let applied = apply_period(&existing, "ts", &window).unwrap();
+        assert_eq!(
+            applied
+                .ignored
+                .iter()
+                .map(|filter| filter.column.as_str())
+                .collect::<Vec<_>>(),
+            ["TS", "ts"]
+        );
+        assert_eq!(applied.dip.filters.len(), 3);
+        assert_eq!(applied.dip.filters[0].column, "ID");
+        assert_eq!(applied.dip.filters[0].op, FilterOp::Gt);
+        assert!(applied
+            .dip
+            .filters
+            .iter()
+            .skip(1)
+            .all(|filter| filter.column == "TS"));
+        assert_eq!(applied.dip.filters[1].op, FilterOp::Gte);
+        assert_eq!(applied.dip.filters[2].op, FilterOp::Lt);
+        assert!(apply_period(&sample(Vec::new()), "1bad", &exact).is_err());
+    }
+
+    #[test]
+    fn period_filter_uses_the_first_config_column_spelling() {
+        let window = resolve_period(
+            parse_instant("260821").unwrap(),
+            parse_instant("260821").unwrap(),
+        )
+        .unwrap();
+        let configured = sample(vec![Filter {
             column: "TS".into(),
             op: FilterOp::Eq,
-            value: None,
+            value: Some(toml::Value::Datetime(
+                "2026-08-21T08:00:00".parse().unwrap(),
+            )),
         }]);
-        assert!(apply_period(&existing, "ts", &exact).is_err());
-        assert!(apply_period(&sample(Vec::new()), "1bad", &exact).is_err());
+        let applied = apply_period(&configured, "ts", &window).unwrap();
+        assert_eq!(applied.ignored.len(), 1);
+        assert_eq!(applied.ignored[0].column, "TS");
+        assert!(applied
+            .dip
+            .filters
+            .iter()
+            .all(|filter| filter.column == "TS"));
+        assert!(applied
+            .dip
+            .filters
+            .iter()
+            .any(|filter| filter.op == FilterOp::Gte));
+        assert!(applied
+            .dip
+            .filters
+            .iter()
+            .any(|filter| filter.op == FilterOp::Lt));
+        assert!(!applied
+            .dip
+            .filters
+            .iter()
+            .any(|filter| filter.op == FilterOp::Eq));
+
+        let untouched = apply_period(&sample(Vec::new()), "ts", &window).unwrap();
+        assert!(untouched.ignored.is_empty());
+        assert!(untouched
+            .dip
+            .filters
+            .iter()
+            .all(|filter| filter.column == "ts"));
     }
 
     #[test]

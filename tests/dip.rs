@@ -1334,15 +1334,32 @@ fn bad_periods_do_not_create_a_store() {
             "{args:?} created a store:\n{stderr}"
         );
     }
+}
 
+fn assert_no_datetime_literals(logged: &[&str]) {
+    for sql in logged {
+        assert!(
+            !sql.contains("2026-08-21") && !sql.contains("08:00:00"),
+            "datetime literal in sql: {sql}"
+        );
+    }
+}
+
+#[test]
+fn cli_period_overrides_config_time_filters_for_this_run() {
     let dir = tempfile::tempdir().unwrap();
-    let (_db, config) = events_config(
+    let (db, config) = events_config(
         dir.path(),
         r#"filters = [{ column = "TS", op = "eq", value = 2026-08-21T08:00:00 }]"#,
     );
-    common::dipper()
+    let before = std::fs::read(&config).unwrap();
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+    );
+    let output = common::dipper()
         .current_dir(dir.path())
-        .args(["--config"])
+        .args(["--log-sql", "--config"])
         .arg(&config)
         .args([
             "dip",
@@ -1355,8 +1372,182 @@ fn bad_periods_do_not_create_a_store() {
             "--yes",
         ])
         .assert()
-        .code(1);
-    assert!(!dir.path().join(".dipper").exists());
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains(
+        "note: events: --from/--to overrides config filters on time column TS for this run; the config file was not changed"
+    ), "{stderr}");
+    assert!(
+        stderr.contains("ignored filter: TS eq 2026-08-21T08:00:00"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("overrides config filters on time column"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the config file was not changed"),
+        "{stderr}"
+    );
+    let note_at = stderr.find("overrides config filters").unwrap();
+    let preview_at = stderr.find("preview:").expect("preview line");
+    assert!(note_at < preview_at, "{stderr}");
+    let logged = sql_lines(&stderr);
+    assert_no_datetime_literals(&logged);
+    assert!(logged.iter().any(|sql| sql.contains('?')), "{logged:?}");
+    assert!(
+        logged
+            .iter()
+            .any(|sql| sql.contains(">=") && sql.contains('<')),
+        "{logged:?}"
+    );
+    assert!(
+        logged.iter().all(|sql| !sql.contains("\"TS\" =")),
+        "{logged:?}"
+    );
+    assert_eq!(
+        count_and_sum(&store_path(dir.path()), "events", "ID").0,
+        expected
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+}
+
+#[test]
+fn cli_period_keeps_other_column_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(
+        dir.path(),
+        r#"filters = [
+  { column = "ID", op = "gt", value = 2 },
+  { column = "TS", op = "eq", value = 2026-08-21T08:00:00 }
+]"#,
+    );
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE ID > 2 AND TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(
+        stderr.contains("overrides config filters on time column"),
+        "{stderr}"
+    );
+    let logged = sql_lines(&stderr);
+    assert!(
+        logged.iter().any(|sql| sql.contains("\"ID\" >")),
+        "{logged:?}"
+    );
+    assert!(
+        logged.iter().all(|sql| !sql.contains("\"TS\" =")),
+        "{logged:?}"
+    );
+    assert_eq!(
+        count_and_sum(&store_path(dir.path()), "events", "ID").0,
+        expected
+    );
+}
+
+#[test]
+fn config_time_filter_applies_when_no_period_is_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(
+        dir.path(),
+        r#"filters = [{ column = "TS", op = "eq", value = 2026-08-21T08:00:00 }]"#,
+    );
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS = '2026-08-21 08:00:00'",
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["dip", "--yes"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(!stderr.contains("overrides config filters"), "{stderr}");
+    assert!(!stderr.contains("ignored filter:"), "{stderr}");
+    assert_eq!(
+        count_and_sum(&store_path(dir.path()), "events", "ID").0,
+        expected
+    );
+}
+
+#[test]
+fn period_sql_uses_the_config_column_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(
+        dir.path(),
+        r#"filters = [{ column = "TS", op = "eq", value = 2026-08-21T08:00:00 }]"#,
+    );
+    let before = std::fs::read(&config).unwrap();
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "ts",
+            "--yes",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("time column ts for this run"), "{stderr}");
+    assert!(
+        stderr.contains("ignored filter: TS eq 2026-08-21T08:00:00"),
+        "{stderr}"
+    );
+    let logged = sql_lines(&stderr);
+    assert_no_datetime_literals(&logged);
+    assert!(
+        logged
+            .iter()
+            .any(|sql| sql.contains("\"TS\" >=") && sql.contains("\"TS\" <")),
+        "{logged:?}"
+    );
+    assert!(
+        logged.iter().all(|sql| !sql.contains("\"ts\"")),
+        "{logged:?}"
+    );
+    assert_eq!(
+        count_and_sum(&store_path(dir.path()), "events", "ID").0,
+        expected
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
 }
 
 #[test]
