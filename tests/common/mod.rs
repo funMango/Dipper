@@ -99,6 +99,26 @@ pub fn make_bulk_sqlite(dir: &Path, file: &str) -> PathBuf {
     path
 }
 
+/// `EVENTS.TS` holds ISO timestamps so period filters can be counted exactly.
+pub fn make_events_sqlite(dir: &Path, file: &str) -> PathBuf {
+    let path = dir.join(file);
+    let conn = Connection::open(&path).expect("create events sqlite source");
+    conn.execute_batch(
+        "CREATE TABLE EVENTS (ID INTEGER PRIMARY KEY, TS TEXT);
+         INSERT INTO EVENTS (ID, TS) VALUES
+           (1, '2026-08-20 23:00:00'),
+           (2, '2026-08-21 00:00:00'),
+           (3, '2026-08-21 08:00:00'),
+           (4, '2026-08-21 08:00:00'),
+           (5, '2026-08-21 15:00:00'),
+           (6, '2026-08-22 00:00:00'),
+           (7, '2026-09-20 12:00:00'),
+           (8, '2026-09-21 00:00:00');",
+    )
+    .unwrap();
+    path
+}
+
 fn insert_series(
     conn: &mut Connection,
     sql: &str,
