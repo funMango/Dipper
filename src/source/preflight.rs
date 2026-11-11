@@ -102,7 +102,7 @@ impl DictQuery {
                 r#"SELECT "COLUMN_NAME", "VIRTUAL_COLUMN", "NULLABLE" FROM "ALL_TAB_COLS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
             }
             DictQuery::AllTabColumns => {
-                r#"SELECT "COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE", "COLUMN_ID", "VIRTUAL_COLUMN" FROM "ALL_TAB_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 ORDER BY "COLUMN_ID""#
+                r#"SELECT "COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE", "COLUMN_ID" FROM "ALL_TAB_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 ORDER BY "COLUMN_ID""#
             }
             DictQuery::AllColComments => {
                 r#"SELECT "COLUMN_NAME", "COMMENTS" FROM "ALL_COL_COMMENTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
@@ -1154,6 +1154,189 @@ mod tests {
             parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
             assert!(!query.sql().contains('\''), "{}", query.sql());
         }
+    }
+
+    /// Columns these dictionary views expose on Oracle 19c. `VIRTUAL_COLUMN` is on
+    /// `ALL_TAB_COLS` only, not on `ALL_TAB_COLUMNS`.
+    #[test]
+    fn oracle_dictionary_sql_uses_19c_columns() {
+        let allowed: &[(&str, &[&str])] = &[
+            (
+                "ALL_TAB_COLUMNS",
+                &[
+                    "OWNER",
+                    "TABLE_NAME",
+                    "COLUMN_NAME",
+                    "DATA_TYPE",
+                    "DATA_LENGTH",
+                    "DATA_PRECISION",
+                    "DATA_SCALE",
+                    "NULLABLE",
+                    "COLUMN_ID",
+                ],
+            ),
+            (
+                "ALL_TAB_COLS",
+                &[
+                    "OWNER",
+                    "TABLE_NAME",
+                    "COLUMN_NAME",
+                    "DATA_TYPE",
+                    "DATA_LENGTH",
+                    "DATA_PRECISION",
+                    "DATA_SCALE",
+                    "NULLABLE",
+                    "COLUMN_ID",
+                    "VIRTUAL_COLUMN",
+                    "HIDDEN_COLUMN",
+                    "USER_GENERATED",
+                ],
+            ),
+            (
+                "ALL_COL_COMMENTS",
+                &["OWNER", "TABLE_NAME", "COLUMN_NAME", "COMMENTS"],
+            ),
+            (
+                "ALL_TAB_COMMENTS",
+                &["OWNER", "TABLE_NAME", "TABLE_TYPE", "COMMENTS"],
+            ),
+            (
+                "ALL_CONSTRAINTS",
+                &[
+                    "OWNER",
+                    "TABLE_NAME",
+                    "CONSTRAINT_NAME",
+                    "CONSTRAINT_TYPE",
+                    "STATUS",
+                ],
+            ),
+            (
+                "ALL_CONS_COLUMNS",
+                &[
+                    "OWNER",
+                    "TABLE_NAME",
+                    "CONSTRAINT_NAME",
+                    "COLUMN_NAME",
+                    "POSITION",
+                ],
+            ),
+            ("ALL_OBJECTS", &["OWNER", "OBJECT_NAME", "OBJECT_TYPE"]),
+            (
+                "ALL_SYNONYMS",
+                &[
+                    "OWNER",
+                    "SYNONYM_NAME",
+                    "TABLE_OWNER",
+                    "TABLE_NAME",
+                    "DB_LINK",
+                ],
+            ),
+            (
+                "ALL_DEPENDENCIES",
+                &[
+                    "OWNER",
+                    "NAME",
+                    "TYPE",
+                    "REFERENCED_OWNER",
+                    "REFERENCED_NAME",
+                    "REFERENCED_TYPE",
+                    "REFERENCED_LINK_NAME",
+                ],
+            ),
+            (
+                "ALL_INDEXES",
+                &[
+                    "OWNER",
+                    "INDEX_NAME",
+                    "TABLE_OWNER",
+                    "TABLE_NAME",
+                    "UNIQUENESS",
+                ],
+            ),
+            (
+                "ALL_IND_COLUMNS",
+                &[
+                    "INDEX_OWNER",
+                    "INDEX_NAME",
+                    "TABLE_OWNER",
+                    "TABLE_NAME",
+                    "COLUMN_NAME",
+                ],
+            ),
+            ("USER_USERS", &["USERNAME"]),
+            ("SESSION_PRIVS", &["PRIVILEGE"]),
+            ("SESSION_ROLES", &["ROLE"]),
+            ("USER_TAB_PRIVS_RECD", &["OWNER", "TABLE_NAME", "PRIVILEGE"]),
+            (
+                "ROLE_TAB_PRIVS",
+                &["OWNER", "TABLE_NAME", "ROLE", "PRIVILEGE"],
+            ),
+        ];
+        let queries = [
+            DictQuery::UserUsers,
+            DictQuery::SessionPrivs,
+            DictQuery::SessionRoles,
+            DictQuery::TabPrivsRecd,
+            DictQuery::RoleTabPrivs,
+            DictQuery::AllObjects,
+            DictQuery::AllSynonyms,
+            DictQuery::AllDependencies,
+            DictQuery::AllTabCols,
+            DictQuery::AllTabColumns,
+            DictQuery::AllColComments,
+            DictQuery::AllTabComments,
+            DictQuery::AllConstraints,
+            DictQuery::AllConsColumns,
+            DictQuery::AllConsColumnPositions,
+            DictQuery::AllIndexes,
+            DictQuery::AllIndColumns,
+        ];
+        for query in queries {
+            let sql = query.sql();
+            let (select_sql, rest) = sql
+                .split_once(" FROM \"")
+                .unwrap_or_else(|| panic!("{query:?} has no FROM: {sql}"));
+            let view_end = rest
+                .find('"')
+                .unwrap_or_else(|| panic!("{query:?} view name"));
+            let view = &rest[..view_end];
+            let Some(columns) = allowed
+                .iter()
+                .find(|(name, _)| *name == view)
+                .map(|(_, columns)| *columns)
+            else {
+                panic!("{query:?} view {view} has no 19c column allowlist");
+            };
+            let mut referenced = quoted_idents(select_sql);
+            referenced.extend(quoted_idents(&rest[view_end + 1..]));
+            for column in referenced {
+                assert!(
+                    columns.contains(&column),
+                    "{view}.{column} is not a 19c column in {sql}"
+                );
+            }
+            if view == "ALL_TAB_COLUMNS" {
+                assert!(
+                    !sql.contains("VIRTUAL_COLUMN"),
+                    "VIRTUAL_COLUMN is not on ALL_TAB_COLUMNS in 19c: {sql}"
+                );
+            }
+        }
+        assert!(DictQuery::AllTabCols.sql().contains("\"VIRTUAL_COLUMN\""));
+    }
+
+    fn quoted_idents(sql: &str) -> Vec<&str> {
+        let mut idents = Vec::new();
+        let mut rest = sql;
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            let end = after
+                .find('"')
+                .unwrap_or_else(|| panic!("unclosed quote in {sql}"));
+            idents.push(&after[..end]);
+            rest = &after[end + 1..];
+        }
+        idents
     }
 
     #[test]

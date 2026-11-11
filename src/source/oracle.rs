@@ -447,7 +447,6 @@ impl Source for OracleSource {
             let column_id = cell_i64(row, 6)
                 .map_err(|message| message_error(self.name(), message))?
                 .unwrap_or(i64::MAX);
-            let virtual_column = cell_text(row, 7).as_deref() == Some("YES");
             columns.push((
                 column_id,
                 CatalogColumn {
@@ -457,7 +456,7 @@ impl Source for OracleSource {
                     data_precision,
                     data_scale,
                     nullable,
-                    virtual_column,
+                    virtual_column: false,
                     db_comment: None,
                 },
             ));
@@ -465,6 +464,17 @@ impl Source for OracleSource {
         columns.sort_by_key(|(id, _)| *id);
         let mut columns: Vec<CatalogColumn> =
             columns.into_iter().map(|(_, column)| column).collect();
+        // VIRTUAL_COLUMN exists on ALL_TAB_COLS in 19c, not on ALL_TAB_COLUMNS.
+        let virtual_rows = self.session.rows(DictQuery::AllTabCols, &binds)?;
+        for row in &virtual_rows {
+            let Some(name) = cell_text(row, 0) else {
+                continue;
+            };
+            let is_virtual = cell_text(row, 1).as_deref() == Some("YES");
+            if let Some(column) = columns.iter_mut().find(|column| column.name == name) {
+                column.virtual_column = is_virtual;
+            }
+        }
         let comments = self.session.rows(DictQuery::AllColComments, &binds)?;
         for row in &comments {
             let Some(name) = cell_text(row, 0) else {
