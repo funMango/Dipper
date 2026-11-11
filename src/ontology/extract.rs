@@ -243,4 +243,15 @@ mod tests {
         };
         assert_eq!(time_column(&catalog).as_deref(), Some("EVENT_DT"));
     }
+
+    #[test]
+    fn several_time_column_candidates_stay_unset() {
+        let catalog = CatalogTable {
+            object_type: "TABLE".to_string(),
+            table_comment: None,
+            primary_key: vec!["EVENT_DT".to_string()],
+            columns: vec![column("EVENT_DT", "DATE"), column("LOAD_DT", "TIMESTAMP")],
+        };
+        assert!(time_column(&catalog).is_none());
+    }
 }

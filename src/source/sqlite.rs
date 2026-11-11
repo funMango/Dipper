@@ -411,7 +411,7 @@ impl Source for SqliteSource {
     }
 
     fn catalog(&self, owner: &str, table: &str) -> Result<CatalogTable, DipperError> {
-        if owner != "main" {
+        if !owner.eq_ignore_ascii_case("main") {
             return Err(source_error(
                 self.name(),
                 format!("schema prefix {owner} is not allowed; only main is allowed"),
@@ -557,6 +557,74 @@ mod tests {
         .unwrap();
         drop(conn);
         path
+    }
+
+    #[test]
+    fn pragma_catalog_rejects_bad_identifiers_inside_a_read_only_transaction() {
+        let _lock = crate::source::session::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = sample(dir.path());
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let src = SqliteSource::connect(
+            "t",
+            &path,
+            480,
+            &OpenOptions {
+                strict: false,
+                log: crate::source::SqlLogSink::Memory(Arc::clone(&log)),
+                action: "ontology".to_string(),
+            },
+        )
+        .unwrap();
+        let err = src.catalog("main", "bad name").unwrap_err();
+        assert!(err.to_string().contains("invalid identifier"), "{err}");
+        let recorded = log.lock().unwrap().clone();
+        assert!(
+            recorded.iter().all(|sql| !sql.contains("table_xinfo")),
+            "{recorded:?}"
+        );
+        let before = recorded.len();
+        src.catalog("main", "ORDERS").unwrap();
+        let recorded = log.lock().unwrap().clone();
+        let slice = &recorded[before..];
+        let pragma_at = slice
+            .iter()
+            .position(|sql| sql == "PRAGMA table_xinfo(\"ORDERS\")")
+            .expect("pragma was not logged");
+        assert!(pragma_at > 0, "{slice:?}");
+        assert_eq!(slice[pragma_at - 1], "BEGIN");
+        assert_eq!(slice[pragma_at + 1], "ROLLBACK");
+        assert!(src.connection().is_autocommit());
+        let err = src
+            .session
+            .executor()
+            .inner()
+            .read_fixed("SELECT 1")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("fixed catalog read is not supported"),
+            "{err}"
+        );
+        let count: i64 = src
+            .connection()
+            .query_row("SELECT COUNT(*) FROM ORDERS", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn catalog_accepts_main_owner_ignoring_case() {
+        let _lock = crate::source::session::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = sample(dir.path());
+        let src = connect("t", &path);
+        let catalog = src.catalog("MAIN", "ORDERS").unwrap();
+        assert_eq!(catalog.object_type, "TABLE");
+        assert!(catalog
+            .columns
+            .iter()
+            .any(|column| column.name == "ORDER_ID"));
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub fn merge(extracted: &OntologyDoc, overlay: &OverlayDoc) -> Result<OntologyDo
         let Some(column) = doc
             .columns
             .iter_mut()
-            .find(|column| column.name == extra.name)
+            .find(|column| column.name.eq_ignore_ascii_case(&extra.name))
         else {
             return Err(format!(
                 "overlay column {} is not in the extracted table",
@@ -142,4 +142,68 @@ fn same_structure(column: &OntologyColumn, extra: &OverlayColumn) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ontology::schema::{FieldStatus, OntologyColumn, OntologyDoc, VERSION};
+
+    #[test]
+    fn overlay_column_match_ignores_ascii_case() {
+        let extracted = OntologyDoc {
+            version: VERSION,
+            source: "sample".to_string(),
+            owner: "main".to_string(),
+            table: "EVENTS".to_string(),
+            extracted_at: "2026-11-11T00:00:00Z".to_string(),
+            object_type: "TABLE".to_string(),
+            table_comment: None,
+            primary_key: vec!["QTY".to_string()],
+            time_column: None,
+            columns: vec![OntologyColumn {
+                name: "QTY".to_string(),
+                data_type: "INTEGER".to_string(),
+                data_length: None,
+                data_precision: None,
+                data_scale: None,
+                nullable: true,
+                is_virtual: false,
+                db_comment: None,
+                meaning: None,
+                meaning_status: FieldStatus::Unknown,
+                unit: None,
+                unit_status: FieldStatus::Unknown,
+            }],
+        };
+        let overlay = OverlayDoc {
+            version: VERSION,
+            source: None,
+            owner: None,
+            table: None,
+            extracted_at: None,
+            object_type: None,
+            table_comment: None,
+            primary_key: None,
+            time_column: None,
+            columns: vec![OverlayColumn {
+                name: "qty".to_string(),
+                data_type: None,
+                data_length: None,
+                data_precision: None,
+                data_scale: None,
+                nullable: None,
+                is_virtual: None,
+                db_comment: None,
+                meaning: Some("how many".to_string()),
+                meaning_status: Some(FieldStatus::Confirmed),
+                unit: None,
+                unit_status: None,
+            }],
+        };
+        let merged = merge(&extracted, &overlay).unwrap();
+        assert_eq!(merged.columns[0].name, "QTY");
+        assert_eq!(merged.columns[0].meaning.as_deref(), Some("how many"));
+        assert_eq!(merged.columns[0].meaning_status, FieldStatus::Confirmed);
+    }
 }

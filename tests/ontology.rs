@@ -35,6 +35,28 @@ fn pull(dir: &Path, config: &Path, extra: &[&str]) -> assert_cmd::assert::Assert
 }
 
 #[test]
+fn pull_without_table_or_dip_exits_one() {
+    let dir = tempfile::tempdir().unwrap();
+    events_db(dir.path());
+    let config = config(dir.path());
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["ontology", "pull", "sample"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("pass --table OWNER.TABLE or configure a dip"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("ontology").exists());
+}
+
+#[test]
 fn sqlite_extract_matches_columns_and_primary_key() {
     let dir = tempfile::tempdir().unwrap();
     events_db(dir.path());
