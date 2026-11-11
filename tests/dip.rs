@@ -1982,6 +1982,38 @@ fn period_without_from_to_still_uses_swap_in() {
 }
 
 #[test]
+fn preview_over_the_row_limit_loads_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .env("DIPPER_TEST_PREVIEW_LIMIT", "0")
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260821", "260821", &[]))
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("exceeds 0"), "{stderr}");
+    assert!(stderr.contains("nothing was loaded"), "{stderr}");
+    assert_eq!(dipper::config::MAX_PREVIEW_ROWS, 1_000_000);
+    let store = store_path(dir.path());
+    if store.exists() {
+        let conn = duckdb::Connection::open(&store).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND lower(table_name) = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+    }
+}
+
+#[test]
 fn refresh_with_replace_table_exits_one_and_leaves_the_store() {
     let dir = tempfile::tempdir().unwrap();
     let (_db, config) = events_config(dir.path(), "");

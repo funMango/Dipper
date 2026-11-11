@@ -14,8 +14,6 @@ use crate::error::DipperError;
 
 pub use logging::SqlLogSink;
 pub use preflight::{Finding, KeySource, Level, PreflightReport, ResolvedKey};
-#[cfg(test)]
-pub(crate) use session::test_lock;
 pub use session::SessionStatement;
 pub use sqlite::SqliteSource;
 

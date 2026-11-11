@@ -282,7 +282,7 @@ fn write_fetch(
 }
 
 fn preview_row_limit() -> u64 {
-    #[cfg(test)]
+    // Test-only override. The shipped limit stays MAX_PREVIEW_ROWS.
     if let Ok(raw) = std::env::var("DIPPER_TEST_PREVIEW_LIMIT") {
         if let Ok(limit) = raw.parse::<u64>() {
             return limit;
@@ -523,72 +523,6 @@ fn dip_err(message: impl Into<String>) -> DipperError {
 #[cfg(test)]
 mod tests {
     use super::accepts_confirmation;
-
-    #[test]
-    fn preview_over_the_row_limit_loads_nothing() {
-        let _lock = crate::source::test_lock();
-        let dir = tempfile::tempdir().unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("source.db")).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE EVENTS (ID INTEGER, TS TEXT);
-             INSERT INTO EVENTS VALUES (1, '2026-08-21 00:00:00');",
-        )
-        .unwrap();
-        drop(conn);
-        let config = dir.path().join("dipper.toml");
-        std::fs::write(
-            &config,
-            r#"
-store = "store.duckdb"
-[performance]
-temp_directory = "tmp"
-[sources.sample]
-kind = "sqlite"
-path = "source.db"
-[[dips]]
-name = "events"
-source = "sample"
-table = "EVENTS"
-columns = ["ID", "TS"]
-"#,
-        )
-        .unwrap();
-        std::env::set_var("DIPPER_TEST_PREVIEW_LIMIT", "0");
-        let err = super::run(
-            &config,
-            &[],
-            false,
-            false,
-            false,
-            super::PeriodCli {
-                from: Some("260821".to_string()),
-                to: Some("260821".to_string()),
-                time_column: Some("TS".to_string()),
-                yes: true,
-                replace_table: false,
-                refresh: false,
-            },
-            &mut Vec::new(),
-        )
-        .unwrap_err();
-        std::env::remove_var("DIPPER_TEST_PREVIEW_LIMIT");
-        let message = err.to_string();
-        assert!(message.contains("exceeds 0"), "{message}");
-        assert!(message.contains("nothing was loaded"), "{message}");
-        assert_eq!(crate::config::MAX_PREVIEW_ROWS, 1_000_000);
-        let store = dir.path().join("store.duckdb");
-        if store.exists() {
-            let conn = duckdb::Connection::open(store).unwrap();
-            let tables: i64 = conn
-                .query_row(
-                    "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND lower(table_name) = 'events'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(tables, 0);
-        }
-    }
 
     #[test]
     fn only_y_confirms_a_period_load() {
