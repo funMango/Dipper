@@ -39,7 +39,7 @@ fn help_lists_subcommands() {
     }
     assert_eq!(
         commands,
-        ["check", "dip", "tables", "show", "stats", "export", "help"]
+        ["check", "dip", "ontology", "tables", "show", "stats", "export", "help"]
     );
 }
 

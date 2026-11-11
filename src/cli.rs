@@ -33,6 +33,23 @@ pub struct Cli {
     command: Command,
 }
 
+/// `dipper ontology` actions.
+#[derive(Debug, Subcommand)]
+pub enum OntologyCommand {
+    /// Read dictionary metadata into `ontology/extracted`. Overlay files are not changed.
+    Pull {
+        /// Source name from the config file.
+        source: String,
+        /// `OWNER.TABLE`. SQLite may use the table name alone (`main` is the owner).
+        #[arg(long)]
+        table: Option<String>,
+    },
+    /// Write `ontology/md` from extracted JSON plus any overlay.
+    Render,
+    /// Reject an overlay or extracted document that does not match the schema.
+    Validate,
+}
+
 /// Subcommands. Arguments are added in later PRs.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -65,6 +82,11 @@ pub enum Command {
         /// Replace an existing local table. Without this flag a period load stops instead of dropping rows that are already stored.
         #[arg(long)]
         replace_table: bool,
+    },
+    /// Read a source dictionary into ontology JSON, or check and render it.
+    Ontology {
+        #[command(subcommand)]
+        action: OntologyCommand,
     },
     /// List tables in the local store.
     Tables,
@@ -120,6 +142,26 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
                 },
                 &mut handle,
             )
+        }
+        Command::Ontology { action } => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            match action {
+                OntologyCommand::Pull { source, table } => crate::commands::ontology::pull(
+                    &cli.config,
+                    &source,
+                    table.as_deref(),
+                    cli.log_sql,
+                    cli.strict,
+                    &mut handle,
+                ),
+                OntologyCommand::Render => {
+                    crate::commands::ontology::render_docs(std::path::Path::new("."), &mut handle)
+                }
+                OntologyCommand::Validate => {
+                    crate::commands::ontology::validate_docs(std::path::Path::new("."), &mut handle)
+                }
+            }
         }
         Command::Tables => Err(DipperError::NotImplemented("tables")),
         Command::Show => Err(DipperError::NotImplemented("show")),

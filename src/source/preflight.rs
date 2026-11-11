@@ -66,8 +66,12 @@ pub(crate) enum DictQuery {
     AllSynonyms,
     AllDependencies,
     AllTabCols,
+    AllTabColumns,
+    AllColComments,
+    AllTabComments,
     AllConstraints,
     AllConsColumns,
+    AllConsColumnPositions,
     AllIndexes,
     AllIndColumns,
     SqliteMaster,
@@ -97,11 +101,23 @@ impl DictQuery {
             DictQuery::AllTabCols => {
                 r#"SELECT "COLUMN_NAME", "VIRTUAL_COLUMN", "NULLABLE" FROM "ALL_TAB_COLS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
             }
+            DictQuery::AllTabColumns => {
+                r#"SELECT "COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE", "COLUMN_ID", "VIRTUAL_COLUMN" FROM "ALL_TAB_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 ORDER BY "COLUMN_ID""#
+            }
+            DictQuery::AllColComments => {
+                r#"SELECT "COLUMN_NAME", "COMMENTS" FROM "ALL_COL_COMMENTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
+            }
+            DictQuery::AllTabComments => {
+                r#"SELECT "COMMENTS" FROM "ALL_TAB_COMMENTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
+            }
             DictQuery::AllConstraints => {
                 r#"SELECT "CONSTRAINT_NAME", "CONSTRAINT_TYPE" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 AND "STATUS" = :3"#
             }
             DictQuery::AllConsColumns => {
                 r#"SELECT "CONSTRAINT_NAME", "COLUMN_NAME" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
+            }
+            DictQuery::AllConsColumnPositions => {
+                r#"SELECT "CONSTRAINT_NAME", "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
             }
             DictQuery::AllIndexes => {
                 r#"SELECT "OWNER", "INDEX_NAME" FROM "ALL_INDEXES" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2 AND "UNIQUENESS" = :3"#
@@ -1125,8 +1141,12 @@ mod tests {
             DictQuery::AllSynonyms,
             DictQuery::AllDependencies,
             DictQuery::AllTabCols,
+            DictQuery::AllTabColumns,
+            DictQuery::AllColComments,
+            DictQuery::AllTabComments,
             DictQuery::AllConstraints,
             DictQuery::AllConsColumns,
+            DictQuery::AllConsColumnPositions,
             DictQuery::AllIndexes,
             DictQuery::AllIndColumns,
             DictQuery::SqliteMaster,

@@ -9,12 +9,12 @@ use rusqlite::{config::DbConfig, Connection, OpenFlags, Row};
 
 use crate::error::DipperError;
 use crate::source::logging::LoggingExecutor;
-use crate::source::preflight::{blocks, run_sqlite};
+use crate::source::preflight::{blocks, run_sqlite, DictQuery, Dictionary};
 use crate::source::session::{Executor, RowCursor, Session, SessionOptions, SessionStatement};
 use crate::source::watchdog::{Breaker, SystemClock};
 use crate::source::{
-    session_deadline, ChunkIter, OpenOptions, Opened, Paging, PreflightReport, SelectSpec, Source,
-    Value,
+    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogTable, ChunkIter, OpenOptions,
+    Opened, Paging, PreflightReport, SelectSpec, Source, Value,
 };
 use crate::sql::build;
 use crate::sql::guard::{GuardedSelect, SqlDialect};
@@ -175,6 +175,23 @@ impl Executor for SqliteExec {
         }))
     }
 
+    fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+        if !sql.starts_with("PRAGMA table_xinfo(\"") || !sql.ends_with("\")") {
+            return Err(source_error(
+                &self.name,
+                "fixed catalog read is not supported".to_string(),
+            ));
+        }
+        let mut statement = self.conn.prepare(sql).map_err(|err| self.fail(err))?;
+        let width = statement.column_count();
+        let mut rows = statement.query([]).map_err(|err| self.fail(err))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|err| self.fail(err))? {
+            out.push(read_row(row, width).map_err(|err| self.fail(err))?);
+        }
+        Ok(out)
+    }
+
     fn breaker(&self) -> Arc<dyn Breaker> {
         Arc::clone(&self.breaker) as Arc<dyn Breaker>
     }
@@ -187,6 +204,11 @@ impl Executor for SqliteExec {
         }
         Ok(())
     }
+}
+
+fn pragma_arg_is_ident(value: &str) -> bool {
+    let value = value.trim().trim_matches('"');
+    crate::sql::validate_column_ident(value).is_ok()
 }
 
 fn authorize(ctx: AuthContext<'_>) -> Authorization {
@@ -205,6 +227,12 @@ fn authorize(ctx: AuthContext<'_>) -> Authorization {
         } if pragma_name.eq_ignore_ascii_case("query_only")
             && matches!(pragma_value, None | Some("ON")) =>
         {
+            Authorization::Allow
+        }
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value: Some(value),
+        } if pragma_name.eq_ignore_ascii_case("table_xinfo") && pragma_arg_is_ident(value) => {
             Authorization::Allow
         }
         _ => Authorization::Deny,
@@ -381,6 +409,98 @@ impl Source for SqliteSource {
         };
         Ok(self.session.chunks(plan))
     }
+
+    fn catalog(&self, owner: &str, table: &str) -> Result<CatalogTable, DipperError> {
+        if !owner.eq_ignore_ascii_case("main") {
+            return Err(source_error(
+                self.name(),
+                format!("schema prefix {owner} is not allowed; only main is allowed"),
+            ));
+        }
+        crate::sql::validate_column_ident(table)
+            .map_err(|message| source_error(self.name(), message))?;
+        let master = self
+            .session
+            .rows(DictQuery::SqliteMaster, &[Value::Text(table.to_string())])?;
+        let Some(object) = master.first() else {
+            return Err(source_error(
+                self.name(),
+                format!("object not found: {table}"),
+            ));
+        };
+        let kind = cell_text(object, 0).unwrap_or_default();
+        let object_type = if kind.eq_ignore_ascii_case("view") {
+            "VIEW"
+        } else if kind.eq_ignore_ascii_case("table") {
+            "TABLE"
+        } else {
+            return Err(source_error(
+                self.name(),
+                format!("ontology pull supports tables and views, found {kind}"),
+            ));
+        };
+        let pragma = self.session.read_pragma(table)?;
+        let mut columns = Vec::with_capacity(pragma.len());
+        let mut keyed = Vec::new();
+        for row in &pragma {
+            let name = cell_text(row, 1).ok_or_else(|| {
+                source_error(
+                    self.name(),
+                    "pragma table_xinfo returned no column name".to_string(),
+                )
+            })?;
+            let data_type = cell_text(row, 2).unwrap_or_else(|| "NONE".to_string());
+            let notnull = cell_i64(row, 3).map_err(|message| source_error(self.name(), message))?;
+            let pk = cell_i64(row, 5).map_err(|message| source_error(self.name(), message))?;
+            let hidden = cell_i64(row, 6).map_err(|message| source_error(self.name(), message))?;
+            if let Some(position) = pk.filter(|position| *position > 0) {
+                keyed.push((position, name.clone()));
+            }
+            let (data_length, data_precision, data_scale) = sqlite_type_numbers(&data_type);
+            columns.push(CatalogColumn {
+                name,
+                data_type,
+                data_length,
+                data_precision,
+                data_scale,
+                nullable: notnull.unwrap_or(0) == 0,
+                virtual_column: matches!(hidden, Some(2) | Some(3)),
+                db_comment: None,
+            });
+        }
+        keyed.sort_by_key(|(position, _)| *position);
+        Ok(CatalogTable {
+            object_type: object_type.to_string(),
+            table_comment: None,
+            primary_key: keyed.into_iter().map(|(_, name)| name).collect(),
+            columns,
+        })
+    }
+}
+
+fn sqlite_type_numbers(data_type: &str) -> (Option<i64>, Option<i64>, Option<i64>) {
+    let upper = data_type.to_ascii_uppercase();
+    let Some(open) = upper.find('(') else {
+        return (None, None, None);
+    };
+    let Some(close) = upper.find(')') else {
+        return (None, None, None);
+    };
+    if close < open {
+        return (None, None, None);
+    }
+    let mut numbers = upper[open + 1..close]
+        .split(',')
+        .filter_map(|part| part.trim().parse::<i64>().ok());
+    let first = numbers.next();
+    let second = numbers.next();
+    if upper.starts_with("CHAR") || upper.starts_with("VARCHAR") || upper.starts_with("NCHAR") {
+        (first, None, None)
+    } else if upper.starts_with("NUM") || upper.starts_with("DEC") || upper.starts_with("FLOAT") {
+        (None, first, second)
+    } else {
+        (first, second, None)
+    }
 }
 
 fn blocked(name: &str, report: &PreflightReport) -> DipperError {
@@ -437,6 +557,74 @@ mod tests {
         .unwrap();
         drop(conn);
         path
+    }
+
+    #[test]
+    fn pragma_catalog_rejects_bad_identifiers_inside_a_read_only_transaction() {
+        let _lock = crate::source::session::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = sample(dir.path());
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let src = SqliteSource::connect(
+            "t",
+            &path,
+            480,
+            &OpenOptions {
+                strict: false,
+                log: crate::source::SqlLogSink::Memory(Arc::clone(&log)),
+                action: "ontology".to_string(),
+            },
+        )
+        .unwrap();
+        let err = src.catalog("main", "bad name").unwrap_err();
+        assert!(err.to_string().contains("invalid identifier"), "{err}");
+        let recorded = log.lock().unwrap().clone();
+        assert!(
+            recorded.iter().all(|sql| !sql.contains("table_xinfo")),
+            "{recorded:?}"
+        );
+        let before = recorded.len();
+        src.catalog("main", "ORDERS").unwrap();
+        let recorded = log.lock().unwrap().clone();
+        let slice = &recorded[before..];
+        let pragma_at = slice
+            .iter()
+            .position(|sql| sql == "PRAGMA table_xinfo(\"ORDERS\")")
+            .expect("pragma was not logged");
+        assert!(pragma_at > 0, "{slice:?}");
+        assert_eq!(slice[pragma_at - 1], "BEGIN");
+        assert_eq!(slice[pragma_at + 1], "ROLLBACK");
+        assert!(src.connection().is_autocommit());
+        let err = src
+            .session
+            .executor()
+            .inner()
+            .read_fixed("SELECT 1")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("fixed catalog read is not supported"),
+            "{err}"
+        );
+        let count: i64 = src
+            .connection()
+            .query_row("SELECT COUNT(*) FROM ORDERS", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn catalog_accepts_main_owner_ignoring_case() {
+        let _lock = crate::source::session::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = sample(dir.path());
+        let src = connect("t", &path);
+        let catalog = src.catalog("MAIN", "ORDERS").unwrap();
+        assert_eq!(catalog.object_type, "TABLE");
+        assert!(catalog
+            .columns
+            .iter()
+            .any(|column| column.name == "ORDER_ID"));
     }
 
     #[test]

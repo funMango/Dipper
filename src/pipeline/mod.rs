@@ -494,6 +494,16 @@ mod tests {
             };
             Ok(Box::new(std::iter::once(Ok(chunk))))
         }
+        fn catalog(
+            &self,
+            _owner: &str,
+            _table: &str,
+        ) -> Result<crate::source::CatalogTable, DipperError> {
+            Err(DipperError::Source {
+                source_name: "sample".to_string(),
+                message: "catalog is not used by this probe".to_string(),
+            })
+        }
     }
 
     struct ProbeOpener {

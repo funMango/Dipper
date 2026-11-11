@@ -503,6 +503,13 @@ impl Source for FailingSource {
             yielded: 0,
         }))
     }
+    fn catalog(
+        &self,
+        owner: &str,
+        table: &str,
+    ) -> Result<dipper::source::CatalogTable, DipperError> {
+        self.inner.catalog(owner, table)
+    }
 }
 
 struct FailAfter<'a> {

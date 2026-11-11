@@ -70,6 +70,11 @@ impl<E: Executor> Executor for LoggingExecutor<E> {
         self.inner.open_cursor(query, binds, fetch_rows)
     }
 
+    fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+        self.record(sql);
+        self.inner.read_fixed(sql)
+    }
+
     fn breaker(&self) -> Arc<dyn Breaker> {
         self.inner.breaker()
     }

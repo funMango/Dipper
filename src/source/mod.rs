@@ -56,6 +56,28 @@ pub struct Chunk {
 
 pub type ChunkIter<'a> = Box<dyn Iterator<Item = Result<Chunk, DipperError>> + 'a>;
 
+/// One column read from a data dictionary. Meaning is not filled here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogColumn {
+    pub name: String,
+    pub data_type: String,
+    pub data_length: Option<i64>,
+    pub data_precision: Option<i64>,
+    pub data_scale: Option<i64>,
+    pub nullable: bool,
+    pub virtual_column: bool,
+    pub db_comment: Option<String>,
+}
+
+/// Table or view shape read from a data dictionary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogTable {
+    pub object_type: String,
+    pub table_comment: Option<String>,
+    pub primary_key: Vec<String>,
+    pub columns: Vec<CatalogColumn>,
+}
+
 pub trait Source {
     fn name(&self) -> &str;
     fn kind(&self) -> &'static str;
@@ -63,6 +85,57 @@ pub trait Source {
     fn preflight(&self, dip: &str, spec: &SelectSpec) -> Result<PreflightReport, DipperError>;
     fn count(&self, spec: &SelectSpec) -> Result<u64, DipperError>;
     fn select<'a>(&'a self, spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError>;
+    /// Read column, key, and comment metadata. This never reads table rows.
+    fn catalog(&self, owner: &str, table: &str) -> Result<CatalogTable, DipperError>;
+}
+
+pub(crate) fn cell_text(row: &[Value], index: usize) -> Option<String> {
+    match row.get(index) {
+        Some(Value::Text(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
+        Some(Value::Int(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn cell_i64(row: &[Value], index: usize) -> Result<Option<i64>, String> {
+    match row.get(index) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Int(value)) => Ok(Some(*value)),
+        Some(Value::Float(value))
+            if value.is_finite()
+                && value.fract() == 0.0
+                && *value >= i64::MIN as f64
+                && *value <= i64::MAX as f64 =>
+        {
+            Ok(Some(*value as i64))
+        }
+        Some(Value::Text(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Ok(None);
+            }
+            if text.contains('.') || text.contains('e') || text.contains('E') {
+                let number: f64 = text
+                    .parse()
+                    .map_err(|_| format!("unexpected number {text}"))?;
+                if number.is_finite() && number.fract() == 0.0 {
+                    return Ok(Some(number as i64));
+                }
+                return Err(format!("unexpected number {text}"));
+            }
+            text.parse::<i64>()
+                .map(Some)
+                .map_err(|_| format!("unexpected number {text}"))
+        }
+        Some(other) => Err(format!("unexpected number {other:?}")),
+    }
 }
 
 /// How `open` should treat warnings and statement logging.

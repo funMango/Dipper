@@ -85,6 +85,14 @@ pub(crate) trait Executor: Send {
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError>;
+    /// A fixed catalog statement, such as a SQLite `PRAGMA table_xinfo`.
+    fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+        let _ = sql;
+        Err(DipperError::Source {
+            source_name: "source".to_string(),
+            message: "fixed catalog read is not supported".to_string(),
+        })
+    }
     fn breaker(&self) -> Arc<dyn Breaker>;
     fn close(&self) -> Result<(), DipperError>;
 }
@@ -224,6 +232,22 @@ impl<E: Executor> Session<E> {
 
     pub(crate) fn strict(&self) -> bool {
         self.strict
+    }
+
+    pub(crate) fn read_pragma(&self, table: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+        crate::sql::validate_column_ident(table).map_err(|message| DipperError::Source {
+            source_name: self.source_name.clone(),
+            message,
+        })?;
+        let sql = format!("PRAGMA table_xinfo(\"{table}\")");
+        self.ensure_deadline()?;
+        let txn = ReadOnlyTxn::begin(&self.exec)?;
+        let read = self.exec.read_fixed(&sql);
+        let rolled = txn.finish();
+        match (read, rolled) {
+            (Ok(rows), Ok(())) => Ok(rows),
+            (Err(err), _) | (Ok(_), Err(err)) => Err(err),
+        }
     }
 
     pub(crate) fn read_all(
@@ -672,6 +696,22 @@ mod tests {
     }
 
     impl FakeExec {
+        fn sqlite() -> Self {
+            Self {
+                dialect: SqlDialect::Sqlite,
+                major: None,
+                log: Arc::new(Mutex::new(Vec::new())),
+                fail_read_only: false,
+                autocommit: AtomicBool::new(true),
+                selects: Arc::new(AtomicUsize::new(0)),
+                fail_select_on: None,
+                panic_on_row: false,
+                rows_per_cursor: 1,
+                closed: Arc::new(AtomicBool::new(false)),
+                peak_buffer: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
         fn oracle(major: i32) -> Self {
             Self {
                 dialect: SqlDialect::Oracle,
@@ -719,6 +759,14 @@ mod tests {
                 _ => {}
             }
             Ok(())
+        }
+
+        fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+            self.log
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .push(sql.to_string());
+            Ok(Vec::new())
         }
 
         fn open_cursor<'a>(
@@ -808,6 +856,30 @@ mod tests {
             "K",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn pragma_read_rejects_bad_identifiers_inside_a_read_only_transaction() {
+        let _lock = test_lock();
+        let exec = FakeExec::sqlite();
+        let log = Arc::clone(&exec.log);
+        let session = Session::start(exec, &options(Arc::new(SystemClock), false)).unwrap();
+        let err = session.read_pragma("bad name").unwrap_err();
+        assert!(err.to_string().contains("invalid identifier"), "{err}");
+        let recorded = log.lock().unwrap().clone();
+        assert!(
+            recorded.iter().all(|sql| !sql.contains("table_xinfo")),
+            "{recorded:?}"
+        );
+        let before = recorded.len();
+        session.read_pragma("EVENTS").unwrap();
+        let recorded = log.lock().unwrap().clone();
+        let slice = &recorded[before..];
+        assert_eq!(
+            slice,
+            ["BEGIN", "PRAGMA table_xinfo(\"EVENTS\")", "ROLLBACK",]
+        );
+        assert!(session.executor().autocommit.load(Ordering::SeqCst));
     }
 
     #[test]
