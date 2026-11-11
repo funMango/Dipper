@@ -2,6 +2,7 @@
 
 mod load;
 mod meta;
+mod slices;
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,10 @@ use crate::error::DipperError;
 
 pub use load::{type_of, widen, ColumnType, TableLoad};
 pub use meta::{RunRecord, RUNS_TABLE};
+pub use slices::{
+    commit_period_load, exact_marker, merge_ranges, plan_refresh, subtract_ranges, HalfOpen,
+    PeriodWrite, SliceRow, SLICES_TABLE,
+};
 
 const LIST_STAGING: &str = "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' AND table_name LIKE '%\\_\\_staging' ESCAPE '\\'";
 
@@ -39,6 +44,7 @@ impl Store {
             .map_err(store_err)?;
         let conn = duckdb::Connection::open_with_flags(path, config).map_err(store_err)?;
         meta::ensure_runs_table(&conn)?;
+        slices::ensure_slices_table(&conn)?;
         cleanup_staging(&conn)?;
         Ok(Self {
             conn,
@@ -57,7 +63,10 @@ impl Store {
     /// Whether `name` is a user table in `main`. Run history and staging names are not targets.
     pub fn table_exists(&self, name: &str) -> Result<bool, DipperError> {
         let folded = name.to_ascii_lowercase();
-        if folded == "_dipper_runs" || folded.ends_with("__staging") {
+        if folded == "_dipper_runs"
+            || folded == crate::store::SLICES_TABLE
+            || folded.ends_with("__staging")
+        {
             return Ok(false);
         }
         let count: i64 = self

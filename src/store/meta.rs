@@ -2,12 +2,14 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::NaiveDateTime;
+
 use crate::error::DipperError;
 use crate::store::{store_err, Store};
 
 pub const RUNS_TABLE: &str = "_dipper_runs";
 
-const CREATE_RUNS: &str = "CREATE TABLE IF NOT EXISTS \"_dipper_runs\" (\"dip\" VARCHAR NOT NULL, \"source\" VARCHAR NOT NULL, \"started_at\" TIMESTAMP NOT NULL, \"finished_at\" TIMESTAMP NOT NULL, \"rows\" BIGINT NOT NULL, \"ok\" BOOLEAN NOT NULL, \"error\" VARCHAR, \"paging\" VARCHAR NOT NULL, \"warnings\" BIGINT NOT NULL)";
+const CREATE_RUNS: &str = "CREATE TABLE IF NOT EXISTS \"_dipper_runs\" (\"dip\" VARCHAR NOT NULL, \"source\" VARCHAR NOT NULL, \"started_at\" TIMESTAMP NOT NULL, \"finished_at\" TIMESTAMP NOT NULL, \"rows\" BIGINT NOT NULL, \"ok\" BOOLEAN NOT NULL, \"error\" VARCHAR, \"paging\" VARCHAR NOT NULL, \"warnings\" BIGINT NOT NULL, \"time_from\" TIMESTAMP, \"time_to\" TIMESTAMP, \"load_mode\" VARCHAR)";
 
 /// One finished or failed dip. Times are UTC instants.
 pub struct RunRecord {
@@ -20,35 +22,54 @@ pub struct RunRecord {
     pub error: Option<String>,
     pub paging: &'static str,
     pub warnings: u64,
+    pub time_from: Option<NaiveDateTime>,
+    pub time_to: Option<NaiveDateTime>,
+    pub load_mode: &'static str,
 }
 
 pub(crate) fn ensure_runs_table(conn: &duckdb::Connection) -> Result<(), DipperError> {
-    conn.execute_batch(CREATE_RUNS).map_err(store_err)
+    conn.execute_batch(CREATE_RUNS).map_err(store_err)?;
+    for sql in [
+        "ALTER TABLE \"_dipper_runs\" ADD COLUMN IF NOT EXISTS \"time_from\" TIMESTAMP",
+        "ALTER TABLE \"_dipper_runs\" ADD COLUMN IF NOT EXISTS \"time_to\" TIMESTAMP",
+        "ALTER TABLE \"_dipper_runs\" ADD COLUMN IF NOT EXISTS \"load_mode\" VARCHAR",
+    ] {
+        conn.execute_batch(sql).map_err(store_err)?;
+    }
+    Ok(())
 }
 
 impl Store {
     /// Append exactly one history row.
     pub fn record_run(&self, record: &RunRecord) -> Result<(), DipperError> {
-        let mut appender = self.conn.appender(RUNS_TABLE).map_err(store_err)?;
-        let row = [
-            duckdb::types::Value::Text(record.dip.clone()),
-            duckdb::types::Value::Text(record.source.clone()),
-            timestamp_value(record.started_at)?,
-            timestamp_value(record.finished_at)?,
-            duckdb::types::Value::BigInt(fit_i64(record.rows, "rows")?),
-            duckdb::types::Value::Boolean(record.ok),
-            match &record.error {
-                Some(error) => duckdb::types::Value::Text(error.clone()),
-                None => duckdb::types::Value::Null,
-            },
-            duckdb::types::Value::Text(record.paging.to_string()),
-            duckdb::types::Value::BigInt(fit_i64(record.warnings, "warnings")?),
-        ];
-        let params: Vec<&dyn duckdb::ToSql> = row.iter().map(|value| value as _).collect();
-        appender.append_row(params.as_slice()).map_err(store_err)?;
-        appender.flush().map_err(store_err)?;
+        self.conn
+            .execute(
+                "INSERT INTO \"_dipper_runs\" (\"dip\", \"source\", \"started_at\", \"finished_at\", \"rows\", \"ok\", \"error\", \"paging\", \"warnings\", \"time_from\", \"time_to\", \"load_mode\") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                duckdb::params![
+                    record.dip.clone(),
+                    record.source.clone(),
+                    timestamp_value(record.started_at)?,
+                    timestamp_value(record.finished_at)?,
+                    fit_i64(record.rows, "rows")?,
+                    record.ok,
+                    record.error.clone(),
+                    record.paging,
+                    fit_i64(record.warnings, "warnings")?,
+                    record.time_from.map(naive_stamp),
+                    record.time_to.map(naive_stamp),
+                    record.load_mode,
+                ],
+            )
+            .map_err(store_err)?;
         Ok(())
     }
+}
+
+fn naive_stamp(at: NaiveDateTime) -> duckdb::types::Value {
+    duckdb::types::Value::Timestamp(
+        duckdb::types::TimeUnit::Microsecond,
+        at.and_utc().timestamp_micros(),
+    )
 }
 
 fn timestamp_value(time: SystemTime) -> Result<duckdb::types::Value, DipperError> {
@@ -102,6 +123,9 @@ mod tests {
                 error: None,
                 paging: "keyset",
                 warnings: 0,
+                time_from: None,
+                time_to: None,
+                load_mode: "replace",
             })
             .unwrap();
         let mut stmt = store
@@ -111,7 +135,7 @@ mod tests {
         let mut rows = stmt.query([]).unwrap();
         assert!(rows.next().unwrap().is_some());
         drop(rows);
-        assert_eq!(stmt.column_count(), 9);
+        assert_eq!(stmt.column_count(), 12);
         let names = stmt.column_names();
         assert_eq!(
             names,
@@ -124,7 +148,10 @@ mod tests {
                 "ok",
                 "error",
                 "paging",
-                "warnings"
+                "warnings",
+                "time_from",
+                "time_to",
+                "load_mode"
             ]
         );
         let count: i64 = store

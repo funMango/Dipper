@@ -604,7 +604,10 @@ columns = ["ITEM_ID", "ORDER_ID", "QTY"]
             "ok",
             "error",
             "paging",
-            "warnings"
+            "warnings",
+            "time_from",
+            "time_to",
+            "load_mode"
         ]
     );
     let mut runs = conn
@@ -1263,12 +1266,11 @@ fn period_load_matches_source_count_and_guards_existing_tables() {
             "--yes",
         ])
         .assert()
-        .code(1)
+        .code(0)
         .get_output()
         .clone();
     let (_, stderr) = texts(&output);
-    assert!(stderr.contains("already exist"), "{stderr}");
-    assert!(stderr.contains("PR6"), "{stderr}");
+    assert!(stderr.contains("nothing to fetch"), "{stderr}");
     assert_eq!(count_and_sum(&store, "events", "ID").0, expected);
 
     let replaced = sqlite_count(
@@ -1310,16 +1312,6 @@ fn bad_periods_do_not_create_a_store() {
         ],
         vec!["dip", "--from", "260821", "--time-column", "TS", "--yes"],
         vec!["dip", "--from", "260821", "--to", "260821", "--yes"],
-        vec![
-            "dip",
-            "--from",
-            "260821",
-            "--to",
-            "260921",
-            "--time-column",
-            "TS",
-            "--yes",
-        ],
         vec!["dip", "--time-column", "TS"],
         vec!["dip", "--replace-table"],
     ];
@@ -1645,4 +1637,368 @@ columns = ["ID", "TS"]
         .code(1);
     assert_eq!(count_and_sum(&store, "events", "ID").0, before);
     assert!(!table_names(&store).iter().any(|name| name == "later"));
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "events",
+            "later",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("has no slice ledger"), "{stderr}");
+}
+
+fn period_args<'a>(from: &'a str, to: &'a str, extra: &'a [&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "dip",
+        "--from",
+        from,
+        "--to",
+        to,
+        "--time-column",
+        "TS",
+        "--yes",
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+fn run_period(
+    dir: &std::path::Path,
+    config: &std::path::Path,
+    from: &str,
+    to: &str,
+    extra: &[&str],
+) {
+    common::dipper()
+        .current_dir(dir)
+        .args(["--config"])
+        .arg(config)
+        .args(period_args(from, to, extra))
+        .assert()
+        .code(0);
+}
+
+fn slice_rows(store: &std::path::Path, dip: &str) -> Vec<(String, String, i64)> {
+    let conn = duckdb::Connection::open(store).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(time_from AS VARCHAR), CAST(time_to AS VARCHAR), rows FROM \"_dipper_slices\" WHERE dip = ? ORDER BY time_from",
+        )
+        .unwrap();
+    stmt.query_map([dip], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+}
+
+fn run_count(store: &std::path::Path) -> i64 {
+    let conn = duckdb::Connection::open(store).unwrap();
+    conn.query_row("SELECT count(*) FROM \"_dipper_runs\"", [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+#[test]
+fn period_fill_fetches_only_missing_september_after_august() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    let august = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-01 00:00:00' AND TS < '2026-09-01 00:00:00'",
+    );
+    let september = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-09-01 00:00:00' AND TS < '2026-10-01 00:00:00'",
+    );
+    assert!(august > 0 && september > 0);
+    run_period(dir.path(), &config, "260801", "260831", &[]);
+    let store = store_path(dir.path());
+    assert_eq!(count_and_sum(&store, "events", "ID").0, august);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args(period_args("260815", "260930", &[]))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("requested"), "{stderr}");
+    assert!(stderr.contains("have"), "{stderr}");
+    assert!(stderr.contains("fetch"), "{stderr}");
+    assert!(stderr.contains("count"), "{stderr}");
+    let logged = sql_lines(&stderr);
+    assert!(logged.iter().any(|sql| sql.contains('?')), "{logged:?}");
+    assert!(
+        logged
+            .iter()
+            .any(|sql| sql.contains(">=") && sql.contains('<')),
+        "{logged:?}"
+    );
+    for sql in &logged {
+        assert!(!sql.contains("2026-"), "datetime literal in sql: {sql}");
+    }
+    assert_eq!(count_and_sum(&store, "events", "ID").0, august + september);
+    let august_now: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE TS < '2026-09-01 00:00:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(august_now, august);
+}
+
+#[test]
+fn period_fill_fetches_each_hole_when_several_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let store = store_path(dir.path());
+    let held = count_and_sum(&store, "events", "ID").0;
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args(period_args("260820", "260822", &[]))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    let selects = sql_lines(&stderr)
+        .into_iter()
+        .filter(|sql| sql.contains("FROM \"EVENTS\"") && sql.contains(">="))
+        .count();
+    assert!(selects >= 2, "{stderr}");
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-20 00:00:00' AND TS < '2026-08-23 00:00:00'",
+    );
+    assert_eq!(count_and_sum(&store, "events", "ID").0, expected);
+    let still_held: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_held, held);
+}
+
+#[test]
+fn period_nothing_to_fetch_exits_zero_without_opening_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let store = store_path(dir.path());
+    let before = count_and_sum(&store, "events", "ID").0;
+    let slices = slice_rows(&store, "events");
+    let runs = run_count(&store);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args(period_args("260821", "260821", &[]))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("nothing to fetch"), "{stderr}");
+    assert!(!stderr.contains("sql:"), "{stderr}");
+    assert_eq!(count_and_sum(&store, "events", "ID").0, before);
+    assert_eq!(slice_rows(&store, "events"), slices);
+    assert_eq!(run_count(&store), runs);
+}
+
+#[test]
+fn period_zero_row_window_is_recorded_in_slices() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260101", "260101", &[]);
+    let store = store_path(dir.path());
+    let loaded: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(loaded, 0);
+    let slices = slice_rows(&store, "events");
+    assert_eq!(slices.len(), 1);
+    assert_eq!(slices[0].2, 0);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args(period_args("260101", "260101", &[]))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("nothing to fetch"), "{stderr}");
+    assert!(!stderr.contains("sql:"), "{stderr}");
+}
+
+#[test]
+fn period_refresh_replaces_only_the_requested_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260822", &[]);
+    let store = store_path(dir.path());
+    let before_next: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE TS >= '2026-08-22 00:00:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM EVENTS WHERE ID = 3", []).unwrap();
+    drop(conn);
+    run_period(dir.path(), &config, "260821", "260821", &["--refresh"]);
+    let august_day = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+    );
+    let loaded_day: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(loaded_day, august_day);
+    let next: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE TS >= '2026-08-22 00:00:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(next, before_next);
+}
+
+#[test]
+fn period_merge_failure_rolls_back_table_and_slices() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let store = store_path(dir.path());
+    let before = count_and_sum(&store, "events", "ID").0;
+    let slices = slice_rows(&store, "events");
+    common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "events"
+source = "sample"
+table = "EVENTS"
+columns = ["ID", "TS", "NOPE"]
+"#,
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260822", "260822", &[]))
+        .assert()
+        .code(1);
+    assert_eq!(count_and_sum(&store, "events", "ID").0, before);
+    assert_eq!(slice_rows(&store, "events"), slices);
+}
+
+#[test]
+fn period_existing_table_without_slices_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .arg("dip")
+        .assert()
+        .code(0);
+    let store = store_path(dir.path());
+    let before = count_and_sum(&store, "events", "ID").0;
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260821", "260821", &[]))
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("has no slice ledger"), "{stderr}");
+    assert!(stderr.contains("--refresh"), "{stderr}");
+    assert!(stderr.contains("--replace-table"), "{stderr}");
+    assert_eq!(count_and_sum(&store, "events", "ID").0, before);
+}
+
+#[test]
+fn period_without_from_to_still_uses_swap_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let store = store_path(dir.path());
+    assert!(!slice_rows(&store, "events").is_empty());
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .arg("dip")
+        .assert()
+        .code(0);
+    let all = sqlite_count(&db, "SELECT COUNT(*) FROM EVENTS");
+    assert_eq!(count_and_sum(&store, "events", "ID").0, all);
+    assert!(slice_rows(&store, "events").is_empty());
+}
+
+#[test]
+fn period_request_longer_than_31_days_succeeds_when_missing_part_fits() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260801", "260831", &[]);
+    let september = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-09-01 00:00:00' AND TS < '2026-10-01 00:00:00'",
+    );
+    run_period(dir.path(), &config, "260815", "260930", &[]);
+    let store = store_path(dir.path());
+    let loaded_september: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE TS >= '2026-09-01 00:00:00' AND TS < '2026-10-01 00:00:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(loaded_september, september);
 }

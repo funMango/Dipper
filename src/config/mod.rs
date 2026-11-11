@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 
 pub use env::{substitute, substitute_secret};
 pub use period::{
-    apply_period, describe_window, parse_instant, resolve_period, rows_exceed_preview,
-    AppliedPeriod, PeriodInstant, PeriodWindow, MAX_PERIOD_DAYS, MAX_PREVIEW_ROWS,
+    apply_period, describe_window, ledger_interval, parse_instant, range_exceeds_limit,
+    resolve_period, rows_exceed_preview, AppliedPeriod, PeriodInstant, PeriodWindow,
+    MAX_PERIOD_DAYS, MAX_PREVIEW_ROWS,
 };
 pub use schema::{Config, Dip, Filter, FilterOp, Paging, Performance, Secret, SourceConfig};
 

@@ -57,10 +57,9 @@ pub enum Command {
     Check,
     /// Copy selected data from sources into the local store.
     ///
-    /// `--from` and `--to` load one period without an external API. A period
-    /// load replaces the whole local table; it does not accumulate earlier
-    /// periods. `--replace-table` is required when that table already exists,
-    /// because the replacement drops the rows that are already there.
+    /// `--from` and `--to` load the missing part of a period. Ranges already
+    /// in the slice ledger are kept. `--refresh` reloads the requested window.
+    /// `--replace-table` replaces the whole local table.
     Dip {
         /// Dip names to run (default: all, in config order).
         names: Vec<String>,
@@ -76,12 +75,15 @@ pub enum Command {
         /// Time column used by `--from` and `--to`.
         #[arg(long)]
         time_column: Option<String>,
-        /// Skip the proceed prompt. Does not skip the 31-day limit, the row limit, or the existing-table check.
+        /// Skip the proceed prompt. Does not skip the 31-day limit on a missing range, the row limit, or the missing-ledger check.
         #[arg(long)]
         yes: bool,
-        /// Replace an existing local table. Without this flag a period load stops instead of dropping rows that are already stored.
+        /// Replace an existing local table with the requested window. Cannot be combined with `--refresh`.
         #[arg(long)]
         replace_table: bool,
+        /// Reload the requested window and replace only that range in the local table.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Read a source dictionary into ontology JSON, or check and render it.
     Ontology {
@@ -124,6 +126,7 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
             time_column,
             yes,
             replace_table,
+            refresh,
         } => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
@@ -139,6 +142,7 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
                     time_column,
                     yes,
                     replace_table,
+                    refresh,
                 },
                 &mut handle,
             )

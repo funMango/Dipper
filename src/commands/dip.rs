@@ -3,14 +3,17 @@
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
+use chrono::NaiveDateTime;
+
 use crate::config::{
-    self, apply_period, describe_window, parse_instant, resolve_period, rows_exceed_preview,
-    AppliedPeriod, Filter, FilterOp, MAX_PREVIEW_ROWS,
+    self, apply_period, describe_window, ledger_interval, parse_instant, range_exceeds_limit,
+    resolve_period, rows_exceed_preview, Filter, FilterOp, PeriodWindow, MAX_PERIOD_DAYS,
+    MAX_PREVIEW_ROWS,
 };
 use crate::error::DipperError;
-use crate::pipeline::{self, progress, spec_for, DefaultOpener, RunOptions};
+use crate::pipeline::{self, progress, spec_for, DefaultOpener, PeriodJob, PeriodKind, RunOptions};
 use crate::source::{Level, OpenOptions, SqlLogSink};
-use crate::store::Store;
+use crate::store::{HalfOpen, SliceRow, Store};
 
 /// Optional period bounds for one `dipper dip` invocation.
 pub struct PeriodCli {
@@ -19,6 +22,7 @@ pub struct PeriodCli {
     pub time_column: Option<String>,
     pub yes: bool,
     pub replace_table: bool,
+    pub refresh: bool,
 }
 
 pub fn run(
@@ -40,58 +44,159 @@ pub fn run(
         SqlLogSink::Off
     };
 
-    let dips: Vec<crate::config::Dip> = if let Some(request) = request {
-        let window = resolve_period(
-            parse_instant(&request.from).map_err(dip_err)?,
-            parse_instant(&request.to).map_err(dip_err)?,
-        )
-        .map_err(dip_err)?;
-        let mut prepared: Vec<AppliedPeriod> = Vec::with_capacity(selected.len());
-        for dip in &selected {
-            prepared.push(apply_period(dip, &request.time_column, &window).map_err(dip_err)?);
-        }
+    let Some(request) = request else {
         let store = Store::open(&config.store, &config.performance)?;
-        if !period.replace_table {
-            let mut existing = Vec::new();
-            for applied in &prepared {
-                if store.table_exists(&applied.dip.name)? {
-                    existing.push(applied.dip.name.clone());
-                }
-            }
-            if !existing.is_empty() {
-                return Err(dip_err(format!(
-                    "local table(s) already exist ({}). A period load replaces the whole table and drops existing rows; it does not accumulate periods (that is PR6). Pass --replace-table to replace them. --yes does not bypass this check.",
-                    existing.join(", ")
-                )));
+        let opts = RunOptions {
+            fail_fast,
+            strict,
+            log,
+        };
+        let mut progress = progress::for_stderr(config.performance.progress_every_rows);
+        let mut stderr = std::io::stderr();
+        let report = pipeline::run(
+            &config,
+            &selected,
+            &store,
+            &opts,
+            &DefaultOpener,
+            progress.as_mut(),
+            &mut stderr,
+        );
+        return write_report(out, &report);
+    };
+
+    let window = resolve_period(
+        parse_instant(&request.from).map_err(dip_err)?,
+        parse_instant(&request.to).map_err(dip_err)?,
+    )
+    .map_err(dip_err)?;
+    let (request_start, request_end) = ledger_interval(&window);
+    let exact = matches!(window, PeriodWindow::Exact { .. });
+    let store = Store::open(&config.store, &config.performance)?;
+    if !period.replace_table && !period.refresh {
+        let mut missing_ledger = Vec::new();
+        for dip in &selected {
+            if store.table_exists(&dip.name)? && !store.has_slices(&dip.name)? {
+                missing_ledger.push(dip.name.clone());
             }
         }
-        for applied in &prepared {
-            note_overridden_filters(&applied.dip.name, &request.time_column, &applied.ignored)?;
+        if !missing_ledger.is_empty() {
+            return Err(dip_err(format!(
+                "{}: has no slice ledger. A period load only fills missing ranges when a ledger exists. Pass --refresh to reload the requested window or --replace-table to replace the whole table. --yes does not bypass this check.",
+                missing_ledger.join(", ")
+            )));
         }
-        for applied in &prepared {
-            let dip = &applied.dip;
-            let count = preview_count(&config, dip, strict, log.clone())?;
-            writeln!(
-                std::io::stderr(),
-                "preview: {}: {}, count {count}",
-                dip.name,
-                describe_window(&request.time_column, &window)
+    }
+    let mut jobs = Vec::new();
+    for dip in &selected {
+        let held = store.list_slices(&dip.name)?;
+        let held_ranges: Vec<HalfOpen> = held
+            .iter()
+            .map(|slice| HalfOpen {
+                start: slice.start,
+                end: slice.end,
+            })
+            .collect();
+        let holes = if period.refresh || period.replace_table {
+            vec![(request_start, request_end)]
+        } else {
+            crate::store::subtract_ranges(
+                HalfOpen {
+                    start: request_start,
+                    end: request_end,
+                },
+                &held_ranges,
             )
-            .map_err(|err| dip_err(err.to_string()))?;
-            if rows_exceed_preview(count, MAX_PREVIEW_ROWS) {
+            .into_iter()
+            .map(|hole| (hole.start, hole.end))
+            .collect::<Vec<_>>()
+        };
+        for (start, end) in &holes {
+            if range_exceeds_limit(*start, *end) {
                 return Err(dip_err(format!(
-                    "{}: preview count {count} exceeds {MAX_PREVIEW_ROWS}; nothing was loaded",
+                    "{}: missing range is longer than {MAX_PERIOD_DAYS} days; narrow the request. Nothing was loaded. --yes does not bypass this check.",
                     dip.name
                 )));
             }
         }
-        confirm_period(period.yes)?;
-        drop(store);
-        prepared.into_iter().map(|applied| applied.dip).collect()
+        let applied = apply_period(dip, &request.time_column, &window).map_err(dip_err)?;
+        if holes.is_empty() {
+            note_overridden_filters(&dip.name, &request.time_column, &applied.ignored)?;
+            write_interval("requested", &dip.name, request_start, request_end)?;
+            for slice in merge_held(&held) {
+                write_interval("have", &dip.name, slice.start, slice.end)?;
+            }
+            writeln!(std::io::stderr(), "nothing to fetch: {}", dip.name)
+                .map_err(|err| dip_err(err.to_string()))?;
+            continue;
+        }
+        jobs.push(PeriodWork {
+            dip: (*dip).clone(),
+            ignored: applied.ignored,
+            held,
+            holes,
+        });
+    }
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    for work in &jobs {
+        note_overridden_filters(&work.dip.name, &request.time_column, &work.ignored)?;
+        write_interval("requested", &work.dip.name, request_start, request_end)?;
+        for slice in merge_held(&work.held) {
+            write_interval("have", &work.dip.name, slice.start, slice.end)?;
+        }
+        if exact {
+            writeln!(
+                std::io::stderr(),
+                "preview: {}: {}",
+                work.dip.name,
+                describe_window(&request.time_column, &window)
+            )
+            .map_err(|err| dip_err(err.to_string()))?;
+        }
+        for (start, end) in &work.holes {
+            let hole_window = if exact {
+                window.clone()
+            } else {
+                PeriodWindow::Range {
+                    start: *start,
+                    end: *end,
+                }
+            };
+            let prepared =
+                apply_period(&work.dip, &request.time_column, &hole_window).map_err(dip_err)?;
+            let count = preview_count(&config, &prepared.dip, strict, log.clone())?;
+            write_fetch(&work.dip.name, *start, *end, count)?;
+            if rows_exceed_preview(count, MAX_PREVIEW_ROWS) {
+                return Err(dip_err(format!(
+                    "{}: preview count {count} exceeds {MAX_PREVIEW_ROWS}; nothing was loaded",
+                    work.dip.name
+                )));
+            }
+        }
+    }
+    confirm_period(period.yes)?;
+    drop(store);
+    let kind = if period.refresh {
+        PeriodKind::Refresh
+    } else if period.replace_table {
+        PeriodKind::Replace
     } else {
-        Vec::new()
+        PeriodKind::Fill
     };
-
+    let jobs: Vec<PeriodJob> = jobs
+        .into_iter()
+        .map(|work| PeriodJob {
+            dip: work.dip,
+            time_column: request.time_column.clone(),
+            exact,
+            request_start,
+            request_end,
+            holes: work.holes,
+            kind: kind_clone(&kind),
+        })
+        .collect();
     let store = Store::open(&config.store, &config.performance)?;
     let opts = RunOptions {
         fail_fast,
@@ -100,33 +205,77 @@ pub fn run(
     };
     let mut progress = progress::for_stderr(config.performance.progress_every_rows);
     let mut stderr = std::io::stderr();
-    let report = if dips.is_empty() && request_was_empty(&period) {
-        pipeline::run(
-            &config,
-            &selected,
-            &store,
-            &opts,
-            &DefaultOpener,
-            progress.as_mut(),
-            &mut stderr,
-        )
-    } else {
-        let refs: Vec<&crate::config::Dip> = dips.iter().collect();
-        pipeline::run(
-            &config,
-            &refs,
-            &store,
-            &opts,
-            &DefaultOpener,
-            progress.as_mut(),
-            &mut stderr,
-        )
-    };
+    let report = pipeline::run_period(
+        &config,
+        &jobs,
+        &store,
+        &opts,
+        &DefaultOpener,
+        progress.as_mut(),
+        &mut stderr,
+    );
     write_report(out, &report)
 }
 
-fn request_was_empty(period: &PeriodCli) -> bool {
-    period.from.is_none() && period.to.is_none()
+struct PeriodWork {
+    dip: crate::config::Dip,
+    ignored: Vec<Filter>,
+    held: Vec<SliceRow>,
+    holes: Vec<(NaiveDateTime, NaiveDateTime)>,
+}
+
+fn kind_clone(kind: &PeriodKind) -> PeriodKind {
+    match kind {
+        PeriodKind::Fill => PeriodKind::Fill,
+        PeriodKind::Refresh => PeriodKind::Refresh,
+        PeriodKind::Replace => PeriodKind::Replace,
+    }
+}
+
+fn merge_held(held: &[SliceRow]) -> Vec<HalfOpen> {
+    crate::store::merge_ranges(
+        &held
+            .iter()
+            .map(|slice| HalfOpen {
+                start: slice.start,
+                end: slice.end,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn write_interval(
+    label: &str,
+    dip: &str,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
+) -> Result<(), DipperError> {
+    writeln!(
+        std::io::stderr(),
+        "preview: {dip}: {label} [{}, {})",
+        stamp(start),
+        stamp(end)
+    )
+    .map_err(|err| dip_err(err.to_string()))
+}
+
+fn write_fetch(
+    dip: &str,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
+    count: u64,
+) -> Result<(), DipperError> {
+    writeln!(
+        std::io::stderr(),
+        "preview: {dip}: fetch [{}, {}), count {count}",
+        stamp(start),
+        stamp(end)
+    )
+    .map_err(|err| dip_err(err.to_string()))
+}
+
+fn stamp(at: NaiveDateTime) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 struct PeriodRequest {
@@ -136,20 +285,27 @@ struct PeriodRequest {
 }
 
 fn period_request(period: &PeriodCli) -> Result<Option<PeriodRequest>, DipperError> {
+    if period.refresh && period.replace_table {
+        return Err(dip_err("--refresh cannot be combined with --replace-table"));
+    }
     match (
         period.from.as_deref(),
         period.to.as_deref(),
         period.time_column.as_deref(),
         period.replace_table,
+        period.refresh,
     ) {
-        (None, None, None, false) => Ok(None),
-        (Some(from), Some(to), Some(column), _) => Ok(Some(PeriodRequest {
+        (None, None, None, false, false) => Ok(None),
+        (Some(from), Some(to), Some(column), _, _) => Ok(Some(PeriodRequest {
             from: from.to_string(),
             to: to.to_string(),
             time_column: column.to_string(),
         })),
-        (None, None, _, true) => Err(dip_err("--replace-table requires --from and --to")),
-        (None, None, Some(_), false) => Err(dip_err("--time-column requires --from and --to")),
+        (None, None, _, true, _) => Err(dip_err("--replace-table requires --from and --to")),
+        (None, None, _, _, true) => Err(dip_err("--refresh requires --from and --to")),
+        (None, None, Some(_), false, false) => {
+            Err(dip_err("--time-column requires --from and --to"))
+        }
         _ => Err(dip_err(
             "--from, --to, and --time-column must be set together",
         )),
