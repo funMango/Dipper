@@ -7,7 +7,7 @@ use crate::store::{quote, store_err, Store};
 
 pub const SLICES_TABLE: &str = "_dipper_slices";
 
-const CREATE_SLICES: &str = "CREATE TABLE IF NOT EXISTS \"_dipper_slices\" (\"dip\" VARCHAR NOT NULL, \"time_from\" TIMESTAMP NOT NULL, \"time_to\" TIMESTAMP NOT NULL, \"rows\" BIGINT NOT NULL, \"loaded_at\" TIMESTAMP NOT NULL)";
+const CREATE_SLICES: &str = "CREATE TABLE IF NOT EXISTS \"_dipper_slices\" (\"dip\" VARCHAR NOT NULL, \"time_from\" TIMESTAMP NOT NULL, \"time_to\" TIMESTAMP NOT NULL, \"rows\" BIGINT, \"loaded_at\" TIMESTAMP NOT NULL)";
 
 /// `[start, end)` with `start < end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +21,10 @@ pub struct HalfOpen {
 pub struct SliceRow {
     pub start: NaiveDateTime,
     pub end: NaiveDateTime,
-    pub rows: u64,
+    /// `None` when this fragment is only part of an older slice. A refresh
+    /// does not re-count the rows that remain outside the reloaded window,
+    /// so a leftover fragment cannot keep the parent slice's row count.
+    pub rows: Option<u64>,
 }
 
 pub(crate) fn ensure_slices_table(conn: &duckdb::Connection) -> Result<(), DipperError> {
@@ -90,28 +93,32 @@ pub fn subtract_ranges(request: HalfOpen, held: &[HalfOpen]) -> Vec<HalfOpen> {
 }
 
 /// Cut `request` out of `held`, then store `request` as one slice and merge neighbors.
+///
+/// A remnant that is not the whole original slice gets `rows = None`. The
+/// ledger does not record which source rows fell inside the cut, so the
+/// leftover count cannot be computed. Merging a known count with `None`
+/// stays `None`.
 pub fn plan_refresh(held: &[SliceRow], request: HalfOpen, new_rows: u64) -> Vec<SliceRow> {
     let mut pieces = Vec::new();
     for slice in held {
-        let remnants = subtract_ranges(
-            HalfOpen {
-                start: slice.start,
-                end: slice.end,
-            },
-            &[request],
-        );
-        for (index, remnant) in remnants.into_iter().enumerate() {
+        let original = HalfOpen {
+            start: slice.start,
+            end: slice.end,
+        };
+        let remnants = subtract_ranges(original, &[request]);
+        for remnant in remnants {
+            let untouched = remnant.start == slice.start && remnant.end == slice.end;
             pieces.push(SliceRow {
                 start: remnant.start,
                 end: remnant.end,
-                rows: if index == 0 { slice.rows } else { 0 },
+                rows: if untouched { slice.rows } else { None },
             });
         }
     }
     pieces.push(SliceRow {
         start: request.start,
         end: request.end,
-        rows: new_rows,
+        rows: Some(new_rows),
     });
     merge_rows(pieces)
 }
@@ -126,7 +133,10 @@ fn merge_rows(rows: Vec<SliceRow>) -> Vec<SliceRow> {
                 if row.end > last.end {
                     last.end = row.end;
                 }
-                last.rows = last.rows.saturating_add(row.rows);
+                last.rows = match (last.rows, row.rows) {
+                    (Some(left), Some(right)) => Some(left.saturating_add(right)),
+                    _ => None,
+                };
                 continue;
             }
         }
@@ -148,7 +158,7 @@ impl Store {
                 Ok((
                     row.get::<_, duckdb::types::Value>(0)?,
                     row.get::<_, duckdb::types::Value>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(2)?,
                 ))
             })
             .map_err(store_err)?;
@@ -158,7 +168,7 @@ impl Store {
             slices.push(SliceRow {
                 start: read_timestamp(start)?,
                 end: read_timestamp(end)?,
-                rows: u64::try_from(count).unwrap_or(0),
+                rows: count.and_then(|count| u64::try_from(count).ok()),
             });
         }
         Ok(slices)
@@ -260,9 +270,23 @@ pub fn commit_period_load(
             insert_slices(&tx, table, slices)?;
         }
     }
+    #[cfg(test)]
+    if let Some(probe) = COMMIT_PROBE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        probe(&tx).map_err(store_err)?;
+    }
     tx.commit().map_err(store_err)?;
     Ok(())
 }
+
+#[cfg(test)]
+type CommitProbe = Box<dyn for<'a> Fn(&duckdb::Transaction<'a>) -> Result<(), String> + Send>;
+
+#[cfg(test)]
+static COMMIT_PROBE: std::sync::Mutex<Option<CommitProbe>> = std::sync::Mutex::new(None);
 
 pub enum PeriodWrite {
     Fill,
@@ -362,7 +386,12 @@ fn insert_slices(
                 dip,
                 stamp(slice.start),
                 stamp(slice.end),
-                i64::try_from(slice.rows).unwrap_or(i64::MAX),
+                match slice.rows {
+                    Some(rows) => duckdb::types::Value::BigInt(
+                        i64::try_from(rows).unwrap_or(i64::MAX),
+                    ),
+                    None => duckdb::types::Value::Null,
+                },
                 loaded_at.clone(),
             ],
         )
@@ -501,5 +530,102 @@ mod tests {
         let marker = exact_marker(at("2026-08-21T08:00:00"));
         assert_eq!(marker.start, at("2026-08-21T08:00:00"));
         assert_eq!(marker.end, at("2026-08-21T08:00:01"));
+    }
+
+    #[test]
+    fn plan_refresh_leaves_unknown_row_counts_on_partial_fragments() {
+        let held = vec![SliceRow {
+            start: day(8, 1),
+            end: day(9, 1),
+            rows: Some(10),
+        }];
+        let planned = plan_refresh(&held, range(day(8, 10), day(8, 20)), 4);
+        assert_eq!(planned.len(), 1, "{planned:?}");
+        assert_eq!(planned[0].start, day(8, 1));
+        assert_eq!(planned[0].end, day(9, 1));
+        assert_eq!(
+            planned[0].rows, None,
+            "a leftover fragment cannot keep the parent row count"
+        );
+    }
+
+    #[test]
+    fn commit_failure_rolls_back_table_and_ledger_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let perf = crate::config::Performance {
+            batch_rows: 10,
+            memory_limit: "64MiB".to_string(),
+            temp_directory: dir.path().join("tmp"),
+            progress_every_rows: 1000,
+        };
+        let store = Store::open(&dir.path().join("store.duckdb"), &perf).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE events (ID VARCHAR, TS VARCHAR);
+                 INSERT INTO events VALUES ('1', '2026-08-21 00:00:00');
+                 CREATE TABLE events__staging (ID VARCHAR, TS VARCHAR);
+                 INSERT INTO events__staging VALUES ('2', '2026-08-22 00:00:00');",
+            )
+            .unwrap();
+        insert_one_slice(&store, "events", day(8, 21), day(8, 22), Some(1));
+        *COMMIT_PROBE.lock().unwrap() = Some(Box::new(|tx| {
+            let table: i64 = tx
+                .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            let slices: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM \"_dipper_slices\" WHERE dip = 'events'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if table != 2 {
+                return Err(format!(
+                    "table change is not inside the commit transaction ({table})"
+                ));
+            }
+            if slices != 2 {
+                return Err(format!(
+                    "ledger write is not inside the commit transaction ({slices})"
+                ));
+            }
+            Err("injected commit failure".to_string())
+        }));
+        let err = commit_period_load(
+            &store,
+            "events",
+            "events__staging",
+            1,
+            &["ID".to_string(), "TS".to_string()],
+            PeriodWrite::Fill,
+            &[SliceRow {
+                start: day(8, 22),
+                end: day(8, 23),
+                rows: Some(1),
+            }],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("injected commit failure"), "{err}");
+        let count: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let slices = store.list_slices("events").unwrap();
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].rows, Some(1));
+    }
+
+    fn insert_one_slice(
+        store: &Store,
+        dip: &str,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+        rows: Option<u64>,
+    ) {
+        let tx = store.conn.unchecked_transaction().unwrap();
+        insert_slices(&tx, dip, &[SliceRow { start, end, rows }]).unwrap();
+        tx.commit().unwrap();
     }
 }

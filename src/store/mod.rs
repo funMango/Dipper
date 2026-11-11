@@ -80,6 +80,28 @@ impl Store {
         Ok(count > 0)
     }
 
+    /// Spelling of `column` as stored on `table`, ignoring ASCII case.
+    pub fn column_spelling(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<String>, DipperError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT column_name FROM duckdb_columns() WHERE schema_name = 'main' AND lower(table_name) = ? AND lower(column_name) = ?",
+            )
+            .map_err(store_err)?;
+        let mut rows = stmt
+            .query([table.to_ascii_lowercase(), column.to_ascii_lowercase()])
+            .map_err(store_err)?;
+        if let Some(row) = rows.next().map_err(store_err)? {
+            Ok(Some(row.get(0).map_err(store_err)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Start a load into `<table>__staging`, dropping a previous leftover of that name first.
     pub fn begin_load(&self, table: &str) -> Result<TableLoad<'_>, DipperError> {
         let staging = format!("{table}__staging");

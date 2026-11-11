@@ -1982,6 +1982,188 @@ fn period_without_from_to_still_uses_swap_in() {
 }
 
 #[test]
+fn refresh_with_replace_table_exits_one_and_leaves_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let store = store_path(dir.path());
+    let before = count_and_sum(&store, "events", "ID").0;
+    let slices = slice_rows(&store, "events");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args(
+            "260821",
+            "260821",
+            &["--refresh", "--replace-table"],
+        ))
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(
+        stderr.contains("--refresh cannot be combined with --replace-table"),
+        "{stderr}"
+    );
+    assert_eq!(count_and_sum(&store, "events", "ID").0, before);
+    assert_eq!(slice_rows(&store, "events"), slices);
+}
+
+#[test]
+fn missing_range_of_32_days_fails_and_31_days_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260101", "260101", &[]);
+    let store = store_path(dir.path());
+    let slices = slice_rows(&store, "events");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260101", "260202", &[]))
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("longer than 31 days"), "{stderr}");
+    assert!(stderr.contains("--yes does not bypass"), "{stderr}");
+    assert_eq!(slice_rows(&store, "events"), slices);
+    run_period(dir.path(), &config, "260101", "260201", &[]);
+    assert!(slice_rows(&store, "events").len() > slices.len());
+}
+
+#[test]
+fn replace_table_with_zero_rows_leaves_the_existing_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let store = store_path(dir.path());
+    let before = count_and_sum(&store, "events", "ID").0;
+    let slices = slice_rows(&store, "events");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260101", "260101", &["--replace-table"]))
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("choose a different period"), "{stderr}");
+    assert!(stderr.contains("0 rows"), "{stderr}");
+    assert_eq!(count_and_sum(&store, "events", "ID").0, before);
+    assert_eq!(slice_rows(&store, "events"), slices);
+}
+
+#[test]
+fn same_instant_bucket_does_not_include_subsecond_rows() {
+    // `column = T` binds the whole second. A source row at T plus a fraction
+    // of a second is a different value and is not part of that bucket.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("source.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE EVENTS (ID INTEGER PRIMARY KEY, TS TEXT);
+         INSERT INTO EVENTS (ID, TS) VALUES
+           (1, '2026-08-21 08:00:00'),
+           (2, '2026-08-21 08:00:00.500');",
+    )
+    .unwrap();
+    drop(conn);
+    let config = common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "events"
+source = "sample"
+table = "EVENTS"
+columns = ["ID", "TS"]
+"#,
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "2026-08-21T08:00:00",
+            "--to",
+            "2026-08-21T08:00:00",
+            "--time-column",
+            "TS",
+            "--yes",
+        ])
+        .assert()
+        .code(0);
+    let store = store_path(dir.path());
+    assert_eq!(count_and_sum(&store, "events", "ID").0, 1);
+}
+
+#[test]
+fn refresh_delete_uses_the_stored_column_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM EVENTS WHERE ID = 3", []).unwrap();
+    drop(conn);
+    common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "events"
+source = "sample"
+table = "EVENTS"
+columns = ["ID", "ts"]
+"#,
+    );
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "ts",
+            "--yes",
+            "--refresh",
+        ])
+        .assert()
+        .code(0);
+    let store = store_path(dir.path());
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+    );
+    let loaded: i64 = duckdb::Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE CAST(TS AS VARCHAR) >= '2026-08-21' AND CAST(TS AS VARCHAR) < '2026-08-22'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(loaded, expected);
+}
+
+#[test]
 fn period_request_longer_than_31_days_succeeds_when_missing_part_fits() {
     let dir = tempfile::tempdir().unwrap();
     let (db, config) = events_config(dir.path(), "");

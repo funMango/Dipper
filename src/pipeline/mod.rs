@@ -538,7 +538,10 @@ fn attempt_period(
         Ok(closed) => closed,
         Err(err) => return fail(rows, warnings, err.to_string()),
     };
-    let stored_column = stored_time_column(&job.dip, &job.time_column);
+    let stored_column = match stored_time_column(store, &job.dip, &job.time_column) {
+        Ok(column) => column,
+        Err(err) => return fail(rows, warnings, err.to_string()),
+    };
     let slices = match job.kind {
         PeriodKind::Fill => hole_rows
             .iter()
@@ -546,7 +549,7 @@ fn attempt_period(
             .map(|(count, (start, end))| crate::store::SliceRow {
                 start: *start,
                 end: *end,
-                rows: *count,
+                rows: Some(*count),
             })
             .collect(),
         PeriodKind::Refresh => {
@@ -566,7 +569,7 @@ fn attempt_period(
         PeriodKind::Replace => vec![crate::store::SliceRow {
             start: job.request_start,
             end: job.request_end,
-            rows: staged_rows,
+            rows: Some(staged_rows),
         }],
     };
     let mode = match job.kind {
@@ -609,12 +612,16 @@ fn hole_window(
     }
 }
 
-fn stored_time_column(dip: &Dip, time_column: &str) -> String {
-    dip.columns
+fn stored_time_column(store: &Store, dip: &Dip, time_column: &str) -> Result<String, DipperError> {
+    if let Some(stored) = store.column_spelling(&dip.name, time_column)? {
+        return Ok(stored);
+    }
+    Ok(dip
+        .columns
         .iter()
         .find(|column| column.eq_ignore_ascii_case(time_column))
         .cloned()
-        .unwrap_or_else(|| time_column.to_string())
+        .unwrap_or_else(|| time_column.to_string()))
 }
 
 fn paging_name(paging: ConfigPaging) -> &'static str {
