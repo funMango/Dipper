@@ -612,7 +612,11 @@ fn hole_window(
     }
 }
 
-fn stored_time_column(store: &Store, dip: &Dip, time_column: &str) -> Result<String, DipperError> {
+pub fn stored_time_column(
+    store: &Store,
+    dip: &Dip,
+    time_column: &str,
+) -> Result<String, DipperError> {
     if let Some(stored) = store.column_spelling(&dip.name, time_column)? {
         return Ok(stored);
     }
@@ -687,6 +691,54 @@ mod tests {
             sources,
             dips,
         }
+    }
+
+    #[test]
+    fn refresh_delete_uses_the_stored_column_spelling() {
+        // columns is empty and the CLI spelling is `ts`. The table stores `TS`.
+        // The old columns/CLI fallback returns `ts` and this assertion fails.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("store.duckdb"),
+            &Performance {
+                batch_rows: 10,
+                memory_limit: "64MiB".to_string(),
+                temp_directory: dir.path().join("tmp"),
+                progress_every_rows: 1000,
+            },
+        )
+        .unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TABLE events (\"ID\" VARCHAR, \"TS\" VARCHAR);
+                 INSERT INTO events VALUES ('1', '2026-08-21 00:00:00');",
+            )
+            .unwrap();
+        let dip = Dip {
+            name: "events".to_string(),
+            source: "sample".to_string(),
+            table: "EVENTS".to_string(),
+            columns: Vec::new(),
+            filters: Vec::new(),
+            limit: None,
+            count_first: false,
+            key: None,
+            paging: ConfigPaging::Snapshot,
+        };
+        let spelling = stored_time_column(&store, &dip, "ts").unwrap();
+        assert_eq!(
+            spelling, "TS",
+            "empty columns must not fall back to the CLI spelling ts"
+        );
+        let deleted = store
+            .conn()
+            .execute(
+                &format!("DELETE FROM events WHERE \"{spelling}\" = '2026-08-21 00:00:00'"),
+                [],
+            )
+            .unwrap();
+        assert_eq!(deleted, 1);
     }
 
     #[test]

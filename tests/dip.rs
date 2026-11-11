@@ -2141,61 +2141,6 @@ columns = ["ID", "TS"]
 }
 
 #[test]
-fn refresh_delete_uses_the_stored_column_spelling() {
-    let dir = tempfile::tempdir().unwrap();
-    let (db, config) = events_config(dir.path(), "");
-    run_period(dir.path(), &config, "260821", "260821", &[]);
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.execute("DELETE FROM EVENTS WHERE ID = 3", []).unwrap();
-    drop(conn);
-    common::write_config(
-        dir.path(),
-        r#"
-store = ".dipper/store.duckdb"
-[sources.sample]
-kind = "sqlite"
-path = "source.db"
-[[dips]]
-name = "events"
-source = "sample"
-table = "EVENTS"
-columns = ["ID", "ts"]
-"#,
-    );
-    common::dipper()
-        .current_dir(dir.path())
-        .args(["--config"])
-        .arg(&config)
-        .args([
-            "dip",
-            "--from",
-            "260821",
-            "--to",
-            "260821",
-            "--time-column",
-            "ts",
-            "--yes",
-            "--refresh",
-        ])
-        .assert()
-        .code(0);
-    let store = store_path(dir.path());
-    let expected = sqlite_count(
-        &db,
-        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
-    );
-    let loaded: i64 = duckdb::Connection::open(&store)
-        .unwrap()
-        .query_row(
-            "SELECT count(*) FROM events WHERE CAST(TS AS VARCHAR) >= '2026-08-21' AND CAST(TS AS VARCHAR) < '2026-08-22'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(loaded, expected);
-}
-
-#[test]
 fn period_request_longer_than_31_days_succeeds_when_missing_part_fits() {
     let dir = tempfile::tempdir().unwrap();
     let (db, config) = events_config(dir.path(), "");

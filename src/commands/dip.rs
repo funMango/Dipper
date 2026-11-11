@@ -282,13 +282,19 @@ fn write_fetch(
 }
 
 fn preview_row_limit() -> u64 {
-    // Test-only override. The shipped limit stays MAX_PREVIEW_ROWS.
-    if let Ok(raw) = std::env::var("DIPPER_TEST_PREVIEW_LIMIT") {
-        if let Ok(limit) = raw.parse::<u64>() {
-            return limit;
-        }
+    // Release builds ignore the variable. Debug builds may only lower the cap.
+    #[cfg(debug_assertions)]
+    {
+        let requested = std::env::var("DIPPER_TEST_PREVIEW_LIMIT")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(MAX_PREVIEW_ROWS);
+        requested.min(MAX_PREVIEW_ROWS)
     }
-    MAX_PREVIEW_ROWS
+    #[cfg(not(debug_assertions))]
+    {
+        MAX_PREVIEW_ROWS
+    }
 }
 
 fn stamp(at: NaiveDateTime) -> String {
@@ -523,6 +529,23 @@ fn dip_err(message: impl Into<String>) -> DipperError {
 #[cfg(test)]
 mod tests {
     use super::accepts_confirmation;
+
+    #[test]
+    fn preview_limit_cannot_be_raised_above_one_million() {
+        assert_eq!(crate::config::MAX_PREVIEW_ROWS, 1_000_000);
+        for raw in ["1000001", &u64::MAX.to_string(), "999999999999"] {
+            std::env::set_var("DIPPER_TEST_PREVIEW_LIMIT", raw);
+            assert_eq!(
+                super::preview_row_limit(),
+                1_000_000,
+                "{raw} must not raise the preview limit"
+            );
+        }
+        std::env::set_var("DIPPER_TEST_PREVIEW_LIMIT", "0");
+        assert_eq!(super::preview_row_limit(), 0);
+        std::env::remove_var("DIPPER_TEST_PREVIEW_LIMIT");
+        assert_eq!(super::preview_row_limit(), 1_000_000);
+    }
 
     #[test]
     fn only_y_confirms_a_period_load() {
