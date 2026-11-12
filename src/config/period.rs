@@ -97,11 +97,20 @@ pub fn resolve_period(from: PeriodInstant, to: PeriodInstant) -> Result<PeriodWi
     if start >= end {
         return Err("period start is after period end".to_string());
     }
-    let span = end - start;
-    if span > TimeDelta::days(MAX_PERIOD_DAYS) {
-        return Err(format!("period is longer than {MAX_PERIOD_DAYS} days"));
-    }
     Ok(PeriodWindow::Range { start, end })
+}
+
+/// Ledger interval for a window. An exact instant is the marker `[T, T+1s)`.
+pub fn ledger_interval(window: &PeriodWindow) -> (NaiveDateTime, NaiveDateTime) {
+    match window {
+        PeriodWindow::Range { start, end } => (*start, *end),
+        PeriodWindow::Exact { at } => (*at, *at + TimeDelta::seconds(1)),
+    }
+}
+
+/// True when a missing half-open range is longer than [`MAX_PERIOD_DAYS`].
+pub fn range_exceeds_limit(start: NaiveDateTime, end: NaiveDateTime) -> bool {
+    end - start > TimeDelta::days(MAX_PERIOD_DAYS)
 }
 
 /// One dip after CLI period filters replace same-column config filters.
@@ -264,17 +273,32 @@ mod tests {
 
     #[test]
     fn thirty_one_days_allowed_and_thirty_two_rejected() {
-        assert!(resolve_period(
+        let short = resolve_period(
             parse_instant("260821").unwrap(),
-            parse_instant("260920").unwrap()
+            parse_instant("260920").unwrap(),
         )
-        .is_ok());
-        let err = resolve_period(
+        .unwrap();
+        let (start, end) = ledger_interval(&short);
+        assert!(!range_exceeds_limit(start, end));
+        let long = resolve_period(
             parse_instant("260821").unwrap(),
             parse_instant("260921").unwrap(),
         )
-        .unwrap_err();
-        assert!(err.contains("31"), "{err}");
+        .unwrap();
+        let (start, end) = ledger_interval(&long);
+        assert!(range_exceeds_limit(start, end));
+    }
+
+    #[test]
+    fn exact_timestamp_is_stored_as_one_second_half_open() {
+        let window = resolve_period(
+            parse_instant("2026-08-21T08:00:00").unwrap(),
+            parse_instant("2026-08-21T08:00:00").unwrap(),
+        )
+        .unwrap();
+        let (start, end) = ledger_interval(&window);
+        assert_eq!(start, stamp("2026-08-21T08:00:00"));
+        assert_eq!(end, stamp("2026-08-21T08:00:01"));
     }
 
     #[test]

@@ -5,6 +5,8 @@ pub mod progress;
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime};
 
+use chrono::NaiveDateTime;
+
 use crate::config::{Config, Dip, Paging as ConfigPaging, SourceConfig};
 use crate::error::DipperError;
 use crate::source::{Finding, Level, OpenOptions, Opened, Paging, SelectSpec, Source, SqlLogSink};
@@ -170,6 +172,9 @@ fn run_one(
         error: record_error,
         paging,
         warnings: attempt.warnings,
+        time_from: None,
+        time_to: None,
+        load_mode: "replace",
     }) {
         let message = err.to_string();
         result = Err(match result {
@@ -345,6 +350,282 @@ fn write_findings(events: &mut dyn Write, dip: &str, findings: &[Finding]) -> Re
         writeln!(events, "{label}: {name}: {}", finding.message).map_err(|err| err.to_string())?;
     }
     Ok(())
+}
+
+/// One period dip. `holes` are the half-open ranges to read. Exact requests use `eq`.
+pub struct PeriodJob {
+    pub dip: Dip,
+    pub time_column: String,
+    pub exact: bool,
+    pub request_start: NaiveDateTime,
+    pub request_end: NaiveDateTime,
+    pub holes: Vec<(NaiveDateTime, NaiveDateTime)>,
+    pub kind: PeriodKind,
+}
+
+pub enum PeriodKind {
+    Fill,
+    Refresh,
+    Replace,
+}
+
+/// Read every hole outside a DuckDB transaction, then commit rows and slices together.
+pub fn run_period(
+    config: &Config,
+    jobs: &[PeriodJob],
+    store: &Store,
+    opts: &RunOptions,
+    opener: &dyn SourceOpener,
+    progress: &mut dyn progress::Progress,
+    events: &mut dyn Write,
+) -> RunReport {
+    let mut outcomes = Vec::new();
+    let mut not_run = Vec::new();
+    for (index, job) in jobs.iter().enumerate() {
+        let outcome = run_period_one(config, job, store, opts, opener, progress, events);
+        let failed = outcome.result.is_err();
+        outcomes.push(outcome);
+        if failed && opts.fail_fast {
+            not_run.extend(jobs[index + 1..].iter().map(|job| job.dip.name.clone()));
+            break;
+        }
+    }
+    RunReport { outcomes, not_run }
+}
+
+fn run_period_one(
+    config: &Config,
+    job: &PeriodJob,
+    store: &Store,
+    opts: &RunOptions,
+    opener: &dyn SourceOpener,
+    progress: &mut dyn progress::Progress,
+    events: &mut dyn Write,
+) -> DipOutcome {
+    let started_at = SystemTime::now();
+    let timer = Instant::now();
+    let paging = paging_name(job.dip.paging);
+    let attempt = attempt_period(config, job, store, opts, opener, progress, events);
+    let finished_at = SystemTime::now();
+    let mut result = attempt.result;
+    let record_error = result.as_ref().err().cloned();
+    let load_mode = match job.kind {
+        PeriodKind::Fill => "fill",
+        PeriodKind::Refresh => "refresh",
+        PeriodKind::Replace => "replace",
+    };
+    if let Err(err) = store.record_run(&RunRecord {
+        dip: job.dip.name.clone(),
+        source: job.dip.source.clone(),
+        started_at,
+        finished_at,
+        rows: attempt.rows,
+        ok: result.is_ok(),
+        error: record_error,
+        paging,
+        warnings: attempt.warnings,
+        time_from: Some(job.request_start),
+        time_to: Some(job.request_end),
+        load_mode,
+    }) {
+        let message = err.to_string();
+        result = Err(match result {
+            Ok(()) => message,
+            Err(previous) => format!("{previous}; {message}"),
+        });
+    }
+    DipOutcome {
+        dip: job.dip.name.clone(),
+        source: job.dip.source.clone(),
+        rows: attempt.rows,
+        elapsed: timer.elapsed(),
+        warnings: attempt.warnings,
+        paging,
+        result,
+    }
+}
+
+fn attempt_period(
+    config: &Config,
+    job: &PeriodJob,
+    store: &Store,
+    opts: &RunOptions,
+    opener: &dyn SourceOpener,
+    progress: &mut dyn progress::Progress,
+    events: &mut dyn Write,
+) -> Attempt {
+    let Some(source_cfg) = config.sources.get(&job.dip.source) else {
+        return fail(0, 0, format!("unknown source: {}", job.dip.source));
+    };
+    let opened = match opener.open(
+        &job.dip.source,
+        source_cfg,
+        &OpenOptions {
+            strict: opts.strict,
+            log: opts.log.clone(),
+            action: format!("dip:{}", job.dip.name),
+        },
+    ) {
+        Ok(opened) => opened,
+        Err(err) => return fail(0, 0, err.to_string()),
+    };
+    let mut warnings = warn_count(&opened.findings);
+    if let Err(message) = write_findings(events, &job.dip.name, &opened.findings) {
+        drop(opened);
+        return fail(0, warnings, message);
+    }
+    let mut load = match store.begin_load(&job.dip.name) {
+        Ok(load) => load,
+        Err(err) => {
+            drop(opened);
+            return fail(0, warnings, err.to_string());
+        }
+    };
+    let mut hole_rows = Vec::new();
+    progress.start(&job.dip.name, None);
+    for (start, end) in &job.holes {
+        let window = hole_window(job, *start, *end);
+        let prepared = match crate::config::apply_period(&job.dip, &job.time_column, &window) {
+            Ok(prepared) => prepared.dip,
+            Err(err) => {
+                drop(opened);
+                drop(load);
+                return fail(0, warnings, err);
+            }
+        };
+        let spec = spec_for(config, &prepared);
+        let report = match opened.source.preflight(&job.dip.name, &spec) {
+            Ok(report) => report,
+            Err(err) => {
+                drop(opened);
+                let rows = load.rows();
+                drop(load);
+                return fail(rows, warnings, err.to_string());
+            }
+        };
+        warnings += warn_count(&report.findings);
+        if let Err(message) = write_findings(events, &job.dip.name, &report.findings) {
+            drop(opened);
+            let rows = load.rows();
+            drop(load);
+            return fail(rows, warnings, message);
+        }
+        let findings: Vec<Finding> = opened
+            .findings
+            .iter()
+            .cloned()
+            .chain(report.findings.iter().cloned())
+            .collect();
+        if let Some(reason) = block_reason(&findings, opts.strict) {
+            drop(opened);
+            let rows = load.rows();
+            drop(load);
+            return fail(rows, warnings, reason);
+        }
+        let before = load.rows();
+        if let Err(err) = read_into(opened.source.as_ref(), &spec, &mut load, progress) {
+            drop(opened);
+            let rows = load.rows();
+            drop(load);
+            return fail(rows, warnings, err.to_string());
+        }
+        hole_rows.push(load.rows() - before);
+    }
+    drop(opened);
+    progress.finish();
+    let rows = load.rows();
+    let (staging, staged_rows, _columns) = match load.close_staging() {
+        Ok(closed) => closed,
+        Err(err) => return fail(rows, warnings, err.to_string()),
+    };
+    let stored_column = match stored_time_column(store, &job.dip, &job.time_column) {
+        Ok(column) => column,
+        Err(err) => return fail(rows, warnings, err.to_string()),
+    };
+    let slices = match job.kind {
+        PeriodKind::Fill => hole_rows
+            .iter()
+            .zip(&job.holes)
+            .map(|(count, (start, end))| crate::store::SliceRow {
+                start: *start,
+                end: *end,
+                rows: Some(*count),
+            })
+            .collect(),
+        PeriodKind::Refresh => {
+            let held = match store.list_slices(&job.dip.name) {
+                Ok(held) => held,
+                Err(err) => return fail(rows, warnings, err.to_string()),
+            };
+            crate::store::plan_refresh(
+                &held,
+                crate::store::HalfOpen {
+                    start: job.request_start,
+                    end: job.request_end,
+                },
+                staged_rows,
+            )
+        }
+        PeriodKind::Replace => vec![crate::store::SliceRow {
+            start: job.request_start,
+            end: job.request_end,
+            rows: Some(staged_rows),
+        }],
+    };
+    let mode = match job.kind {
+        PeriodKind::Fill => crate::store::PeriodWrite::Fill,
+        PeriodKind::Refresh => crate::store::PeriodWrite::Refresh {
+            column: stored_column,
+            start: job.request_start,
+            end: job.request_end,
+            exact: job.exact,
+        },
+        PeriodKind::Replace => crate::store::PeriodWrite::Replace,
+    };
+    match crate::store::commit_period_load(
+        store,
+        &job.dip.name,
+        &staging,
+        staged_rows,
+        &job.dip.columns,
+        mode,
+        &slices,
+    ) {
+        Ok(()) => Attempt {
+            rows: staged_rows,
+            warnings,
+            result: Ok(()),
+        },
+        Err(err) => fail(staged_rows, warnings, err.to_string()),
+    }
+}
+
+fn hole_window(
+    job: &PeriodJob,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
+) -> crate::config::PeriodWindow {
+    if job.exact && start == job.request_start && end == job.request_end {
+        crate::config::PeriodWindow::Exact { at: start }
+    } else {
+        crate::config::PeriodWindow::Range { start, end }
+    }
+}
+
+pub fn stored_time_column(
+    store: &Store,
+    dip: &Dip,
+    time_column: &str,
+) -> Result<String, DipperError> {
+    if let Some(stored) = store.column_spelling(&dip.name, time_column)? {
+        return Ok(stored);
+    }
+    Ok(dip
+        .columns
+        .iter()
+        .find(|column| column.eq_ignore_ascii_case(time_column))
+        .cloned()
+        .unwrap_or_else(|| time_column.to_string()))
 }
 
 fn paging_name(paging: ConfigPaging) -> &'static str {

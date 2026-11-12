@@ -202,8 +202,19 @@ impl<'a> TableLoad<'a> {
         );
         let tx = self.store.conn.unchecked_transaction().map_err(store_err)?;
         tx.execute_batch(&sql).map_err(store_err)?;
+        tx.execute(
+            "DELETE FROM \"_dipper_slices\" WHERE \"dip\" = ?",
+            [&self.table],
+        )
+        .map_err(store_err)?;
         tx.commit().map_err(store_err)?;
         Ok(())
+    }
+
+    /// Close the appender and hand the staging name back for a period commit.
+    pub fn close_staging(mut self) -> Result<(String, u64, Vec<String>), DipperError> {
+        self.flush_and_close()?;
+        Ok((self.staging, self.rows, self.columns))
     }
 
     fn open_appender(&mut self) -> Result<(), DipperError> {

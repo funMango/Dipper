@@ -2,3 +2,6 @@
 /.dipper
 *.duckdb
 *.duckdb.wal
+ontology/extracted/
+ontology/overlay/
+ontology/md/

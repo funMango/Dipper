@@ -72,6 +72,22 @@ fn dip_help_lists_period_flags() {
 }
 
 #[test]
+fn dip_help_lists_refresh() {
+    let output = Command::cargo_bin("dipper")
+        .unwrap()
+        .args(["dip", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--refresh"), "{stdout}");
+    assert!(
+        stdout.contains("missing"),
+        "help should describe filling missing ranges:\n{stdout}"
+    );
+}
+
+#[test]
 fn subcommands_are_not_implemented() {
     for name in ["tables", "show", "stats", "export"] {
         Command::cargo_bin("dipper")

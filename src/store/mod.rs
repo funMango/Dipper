@@ -2,6 +2,7 @@
 
 mod load;
 mod meta;
+mod slices;
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,10 @@ use crate::error::DipperError;
 
 pub use load::{type_of, widen, ColumnType, TableLoad};
 pub use meta::{RunRecord, RUNS_TABLE};
+pub use slices::{
+    commit_period_load, exact_marker, merge_ranges, plan_refresh, subtract_ranges, HalfOpen,
+    PeriodWrite, SliceRow, SLICES_TABLE,
+};
 
 const LIST_STAGING: &str = "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' AND table_name LIKE '%\\_\\_staging' ESCAPE '\\'";
 
@@ -39,6 +44,7 @@ impl Store {
             .map_err(store_err)?;
         let conn = duckdb::Connection::open_with_flags(path, config).map_err(store_err)?;
         meta::ensure_runs_table(&conn)?;
+        slices::ensure_slices_table(&conn)?;
         cleanup_staging(&conn)?;
         Ok(Self {
             conn,
@@ -57,7 +63,10 @@ impl Store {
     /// Whether `name` is a user table in `main`. Run history and staging names are not targets.
     pub fn table_exists(&self, name: &str) -> Result<bool, DipperError> {
         let folded = name.to_ascii_lowercase();
-        if folded == "_dipper_runs" || folded.ends_with("__staging") {
+        if folded == "_dipper_runs"
+            || folded == crate::store::SLICES_TABLE
+            || folded.ends_with("__staging")
+        {
             return Ok(false);
         }
         let count: i64 = self
@@ -69,6 +78,28 @@ impl Store {
             )
             .map_err(store_err)?;
         Ok(count > 0)
+    }
+
+    /// Spelling of `column` as stored on `table`, ignoring ASCII case.
+    pub fn column_spelling(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<String>, DipperError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT column_name FROM duckdb_columns() WHERE schema_name = 'main' AND lower(table_name) = ? AND lower(column_name) = ?",
+            )
+            .map_err(store_err)?;
+        let mut rows = stmt
+            .query([table.to_ascii_lowercase(), column.to_ascii_lowercase()])
+            .map_err(store_err)?;
+        if let Some(row) = rows.next().map_err(store_err)? {
+            Ok(Some(row.get(0).map_err(store_err)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Start a load into `<table>__staging`, dropping a previous leftover of that name first.
@@ -180,6 +211,8 @@ pub(crate) struct TestingRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Dip, Paging};
+    use crate::pipeline::stored_time_column;
 
     fn performance(dir: &Path, memory: &str) -> Performance {
         Performance {
@@ -248,5 +281,48 @@ mod tests {
         assert!(names.iter().any(|name| name == "kept"));
         assert!(names.iter().any(|name| name == "plain_staging"));
         assert!(!names.iter().any(|name| name.ends_with("__staging")));
+    }
+
+    #[test]
+    fn refresh_delete_uses_the_stored_column_spelling() {
+        // columns is empty and the CLI spelling is `ts`. The table stores `TS`.
+        // The old columns/CLI fallback returns `ts` and this assertion fails.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("store.duckdb"),
+            &performance(dir.path(), "64MiB"),
+        )
+        .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE events (\"ID\" VARCHAR, \"TS\" VARCHAR);
+                 INSERT INTO events VALUES ('1', '2026-08-21 00:00:00');",
+            )
+            .unwrap();
+        let dip = Dip {
+            name: "events".to_string(),
+            source: "sample".to_string(),
+            table: "EVENTS".to_string(),
+            columns: Vec::new(),
+            filters: Vec::new(),
+            limit: None,
+            count_first: false,
+            key: None,
+            paging: Paging::Snapshot,
+        };
+        let spelling = stored_time_column(&store, &dip, "ts").unwrap();
+        assert_eq!(
+            spelling, "TS",
+            "empty columns must not fall back to the CLI spelling ts"
+        );
+        let deleted = store
+            .conn
+            .execute(
+                &format!("DELETE FROM events WHERE \"{spelling}\" = '2026-08-21 00:00:00'"),
+                [],
+            )
+            .unwrap();
+        assert_eq!(deleted, 1);
     }
 }

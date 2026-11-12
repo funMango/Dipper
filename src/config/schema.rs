@@ -233,7 +233,7 @@ pub enum SourceConfig {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Dip {
     pub name: String,
     pub source: String,
