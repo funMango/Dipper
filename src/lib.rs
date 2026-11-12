@@ -7,6 +7,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod ontology;
+pub mod output;
 pub mod pipeline;
 pub mod source;
 pub mod sql;

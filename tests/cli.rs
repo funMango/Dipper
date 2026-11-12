@@ -72,6 +72,31 @@ fn dip_help_lists_period_flags() {
 }
 
 #[test]
+fn dip_help_lists_format() {
+    let output = Command::cargo_bin("dipper")
+        .unwrap()
+        .args(["dip", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--format"), "{stdout}");
+    assert!(stdout.contains("table"), "{stdout}");
+    assert!(stdout.contains("json"), "{stdout}");
+}
+
+#[test]
+fn invalid_format_exits_two() {
+    let output = Command::cargo_bin("dipper")
+        .unwrap()
+        .args(["dip", "--format", "xml"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+}
+
+#[test]
 fn dip_help_lists_refresh() {
     let output = Command::cargo_bin("dipper")
         .unwrap()

@@ -160,7 +160,9 @@ fn run_one(
     let paging = paging_name(dip.paging);
     let attempt = attempt_dip(config, dip, store, opts, opener, progress, events);
     let finished_at = SystemTime::now();
-    let mut result = attempt.result;
+    let mut result = attempt
+        .result
+        .map_err(|message| crate::output::redact_with_config(config, &message));
     let record_error = result.as_ref().err().cloned();
     if let Err(err) = store.record_run(&RunRecord {
         dip: dip.name.clone(),
@@ -407,7 +409,9 @@ fn run_period_one(
     let paging = paging_name(job.dip.paging);
     let attempt = attempt_period(config, job, store, opts, opener, progress, events);
     let finished_at = SystemTime::now();
-    let mut result = attempt.result;
+    let mut result = attempt
+        .result
+        .map_err(|message| crate::output::redact_with_config(config, &message));
     let record_error = result.as_ref().err().cloned();
     let load_mode = match job.kind {
         PeriodKind::Fill => "fill",
@@ -900,6 +904,29 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert!(!runs[0].ok);
         assert!(runs[0].error.as_deref().unwrap().contains("ORA-28193"));
+    }
+
+    #[test]
+    fn run_error_redacts_oracle_connect_user_and_password() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let opener = ProbeOpener {
+            calls,
+            fail_open: Some("connect 127.0.0.1:1/NOPE user reader password hidden".to_string()),
+            findings: Vec::new(),
+            preflight: Vec::new(),
+            rows: Vec::new(),
+            fail_select: true,
+        };
+        let (report, store) = run_probe(vec![dip("orders", "company")], &opener, false, false);
+        let err = report.outcomes[0].result.as_ref().unwrap_err();
+        assert!(!err.contains("127.0.0.1:1/NOPE"), "{err}");
+        assert!(!err.contains("reader"), "{err}");
+        assert!(!err.contains("hidden"), "{err}");
+        assert!(err.contains("***"), "{err}");
+        let stored = store.testing_runs().unwrap()[0].error.clone().unwrap();
+        assert!(!stored.contains("127.0.0.1:1/NOPE"), "{stored}");
+        assert!(!stored.contains("reader"), "{stored}");
+        assert!(!stored.contains("hidden"), "{stored}");
     }
 
     #[test]

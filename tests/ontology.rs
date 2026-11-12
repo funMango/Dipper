@@ -35,6 +35,49 @@ fn pull(dir: &Path, config: &Path, extra: &[&str]) -> assert_cmd::assert::Assert
 }
 
 #[test]
+fn ontology_pull_json_lists_written_files() {
+    let dir = tempfile::tempdir().unwrap();
+    events_db(dir.path());
+    let config = config(dir.path());
+    let table = pull(dir.path(), &config, &[]).code(0).get_output().clone();
+    let lines: Vec<String> = String::from_utf8(table.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(!lines.is_empty());
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "pull",
+            "sample",
+            "--table",
+            "main.EVENTS",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["command"], "ontology.pull");
+    assert_eq!(doc["ok"], true);
+    assert_eq!(doc["exit_code"], 0);
+    assert_eq!(doc["source"], "sample");
+    assert!(doc["error"].is_null());
+    let files: Vec<String> = serde_json::from_value(doc["files"].clone()).unwrap();
+    assert_eq!(files, lines);
+    for file in &files {
+        assert!(dir.path().join(file).is_file(), "{file}");
+    }
+}
+
+#[test]
 fn pull_without_table_or_dip_exits_one() {
     let dir = tempfile::tempdir().unwrap();
     events_db(dir.path());

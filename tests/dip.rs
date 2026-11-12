@@ -2161,3 +2161,473 @@ fn period_request_longer_than_31_days_succeeds_when_missing_part_fits() {
         .unwrap();
     assert_eq!(loaded_september, september);
 }
+
+fn json_doc(stdout: &str) -> serde_json::Value {
+    serde_json::from_slice(stdout.as_bytes()).unwrap_or_else(|err| panic!("{err}\n{stdout}"))
+}
+
+fn assert_no_secrets(text: &str, label: &str) {
+    assert!(!text.contains("PR2-canary-7f1d9c"), "{label}: {text}");
+    assert!(!text.contains("reader"), "{label}: {text}");
+    assert!(!text.contains("127.0.0.1:1/NOPE"), "{label}: {text}");
+}
+
+#[test]
+fn dip_json_without_period_reports_rows_and_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    let expected = sqlite_count(&db, "SELECT COUNT(*) FROM EVENTS");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["dip", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["command"], "dip");
+    assert_eq!(doc["ok"], true);
+    assert_eq!(doc["exit_code"], 0);
+    assert!(doc["period"].is_null());
+    assert!(doc["error"].is_null());
+    assert_eq!(doc["dips"][0]["rows_loaded"], expected);
+    assert_eq!(doc["dips"][0]["status"], "ok");
+    assert_eq!(doc["summary"]["ok"], 1);
+}
+
+#[test]
+fn dip_json_period_fill_reports_held_and_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    let september = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-09-01 00:00:00' AND TS < '2026-10-01 00:00:00'",
+    );
+    run_period(dir.path(), &config, "260801", "260831", &[]);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260815", "260930", &["--format", "json"]))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["period"]["mode"], "fill");
+    assert_eq!(doc["period"]["exact"], false);
+    assert_eq!(doc["period"]["start"], "2026-08-15T00:00:00");
+    assert_eq!(doc["period"]["end"], "2026-10-01T00:00:00");
+    assert_eq!(doc["dips"][0]["held"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["dips"][0]["held"][0]["start"], "2026-08-01T00:00:00");
+    assert_eq!(doc["dips"][0]["held"][0]["end"], "2026-09-01T00:00:00");
+    assert_eq!(doc["dips"][0]["fetch"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["dips"][0]["fetch"][0]["start"], "2026-09-01T00:00:00");
+    assert_eq!(doc["dips"][0]["fetch"][0]["end"], "2026-10-01T00:00:00");
+    assert_eq!(doc["dips"][0]["fetch"][0]["count"], september);
+    assert_eq!(doc["dips"][0]["rows_loaded"], september);
+}
+
+#[test]
+fn dip_json_nothing_to_fetch_is_ok_without_source_sql() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    run_period(dir.path(), &config, "260821", "260821", &[]);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args(period_args("260821", "260821", &["--format", "json"]))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["ok"], true);
+    assert_eq!(doc["exit_code"], 0);
+    assert_eq!(doc["dips"][0]["status"], "nothing_to_fetch");
+    assert!(doc["dips"][0]["fetch"].as_array().unwrap().is_empty());
+    assert_eq!(doc["dips"][0]["rows_loaded"], 0);
+    assert!(stderr.contains("nothing to fetch"), "{stderr}");
+    assert!(!stderr.contains("sql:"), "{stderr}");
+    assert!(!stderr.to_ascii_uppercase().contains("SELECT"), "{stderr}");
+}
+
+#[test]
+fn dip_json_refresh_marks_refresh_true() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    let day = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS >= '2026-08-21 00:00:00' AND TS < '2026-08-22 00:00:00'",
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args(
+            "260821",
+            "260821",
+            &["--refresh", "--format", "json"],
+        ))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["period"]["mode"], "refresh");
+    assert_eq!(doc["dips"][0]["refresh"], true);
+    assert_eq!(doc["dips"][0]["fetch"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["dips"][0]["fetch"][0]["start"], "2026-08-21T00:00:00");
+    assert_eq!(doc["dips"][0]["fetch"][0]["end"], "2026-08-22T00:00:00");
+    assert_eq!(doc["dips"][0]["fetch"][0]["count"], day);
+    assert_eq!(doc["dips"][0]["rows_loaded"], day);
+}
+
+#[test]
+fn dip_json_lists_ignored_config_time_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(
+        dir.path(),
+        r#"filters = [{ column = "TS", op = "eq", value = 2026-08-21T08:00:00 }]"#,
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260821", "260821", &["--format", "json"]))
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    let doc = json_doc(&stdout);
+    let ignored = &doc["dips"][0]["ignored_filters"][0];
+    assert_eq!(ignored["column"], "TS");
+    assert_eq!(ignored["op"], "eq");
+    assert_eq!(ignored["value"], "2026-08-21T08:00:00");
+    assert!(stderr.contains(
+        "note: events: --from/--to overrides config filters on time column TS for this run; the config file was not changed"
+    ), "{stderr}");
+}
+
+#[test]
+fn dip_json_exact_timestamp_period_is_one_second() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, config) = events_config(dir.path(), "");
+    let expected = sqlite_count(
+        &db,
+        "SELECT COUNT(*) FROM EVENTS WHERE TS = '2026-08-21 08:00:00'",
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "2026-08-21T08:00:00",
+            "--to",
+            "2026-08-21T08:00:00",
+            "--time-column",
+            "TS",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["period"]["exact"], true);
+    assert_eq!(doc["period"]["start"], "2026-08-21T08:00:00");
+    assert_eq!(doc["period"]["end"], "2026-08-21T08:00:01");
+    assert_eq!(doc["dips"][0]["rows_loaded"], expected);
+}
+
+#[test]
+fn dip_json_pre_run_failure_writes_error_and_exits_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .arg("dip")
+        .assert()
+        .code(0);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260821", "260821", &["--format", "json"]))
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["exit_code"], 1);
+    assert!(doc["dips"].as_array().unwrap().is_empty());
+    assert!(doc["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("has no slice ledger"));
+    assert!(stderr.contains("dipper:"), "{stderr}");
+}
+
+#[test]
+fn dip_json_failed_and_not_run_dips_are_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let dips = r#"
+[[dips]]
+name = "missing"
+source = "sample"
+table = "NOPE"
+columns = ["ORDER_ID"]
+
+[[dips]]
+name = "items"
+source = "sample"
+table = "ITEMS"
+columns = ["ITEM_ID"]
+"#;
+    let (_db, config) = prepare(dir.path(), "batch_rows = 1000", dips);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["dip", "--fail-fast", "--format", "json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["dips"][0]["name"], "missing");
+    assert_eq!(doc["dips"][0]["status"], "failed");
+    assert!(doc["dips"][0]["error"].is_string());
+    assert_eq!(doc["dips"][1]["name"], "items");
+    assert_eq!(doc["dips"][1]["status"], "not_run");
+    assert_eq!(doc["dips"][1]["rows_loaded"], 0);
+    assert_eq!(doc["summary"]["failed"], 1);
+    assert_eq!(doc["summary"]["not_run"], 1);
+    assert!(doc["error"].is_null());
+    assert!(stderr.contains("dipper:"), "{stderr}");
+}
+
+#[test]
+fn dip_json_period_without_yes_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "dip",
+            "--from",
+            "260821",
+            "--to",
+            "260821",
+            "--time-column",
+            "TS",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    let doc = json_doc(&stdout);
+    assert_eq!(doc["exit_code"], 1);
+    assert!(doc["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("needs --yes"));
+    assert!(!store_path(dir.path()).exists(), "{stderr}");
+}
+
+#[test]
+fn dip_json_has_no_row_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("source.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE NOTES (ID INTEGER PRIMARY KEY, BODY TEXT);
+         INSERT INTO NOTES (ID, BODY) VALUES (1, 'ROWCANARY-7c1e');",
+    )
+    .unwrap();
+    drop(conn);
+    let config = common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.sample]
+kind = "sqlite"
+path = "source.db"
+[[dips]]
+name = "notes"
+source = "sample"
+table = "NOTES"
+columns = ["ID", "BODY"]
+"#,
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["dip", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = texts(&output);
+    let _ = json_doc(&stdout);
+    assert!(!stdout.contains("ROWCANARY-7c1e"), "{stdout}");
+}
+
+#[test]
+fn dip_json_hides_oracle_password_user_and_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1/NOPE"
+user = "reader"
+password = "${DIPPER_PR3B_PASSWORD}"
+[[dips]]
+name = "orders"
+source = "company"
+table = "SALES.ORDERS"
+columns = ["ORDER_ID"]
+"#,
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .env("DIPPER_PR3B_PASSWORD", "PR2-canary-7f1d9c")
+        .args(["--config"])
+        .arg(&config)
+        .args(["dip", "--format", "json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    let _ = json_doc(&stdout);
+    assert_no_secrets(&stdout, "stdout");
+    assert_no_secrets(&stderr, "stderr");
+    assert!(stderr.contains("dipper:"), "{stderr}");
+    let conn = duckdb::Connection::open(store_path(dir.path())).unwrap();
+    let error: Option<String> = conn
+        .query_row("SELECT error FROM \"_dipper_runs\"", [], |row| row.get(0))
+        .unwrap();
+    assert_no_secrets(&error.unwrap_or_default(), "runs");
+}
+
+#[test]
+fn oracle_secrets_are_redacted_without_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        r#"
+store = ".dipper/store.duckdb"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1/NOPE"
+user = "reader"
+password = "${DIPPER_PR3B_PASSWORD}"
+[[dips]]
+name = "orders"
+source = "company"
+table = "SALES.ORDERS"
+columns = ["ORDER_ID"]
+"#,
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .env("DIPPER_PR3B_PASSWORD", "PR2-canary-7f1d9c")
+        .args(["--config"])
+        .arg(&config)
+        .arg("dip")
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = texts(&output);
+    assert_no_secrets(&stdout, "stdout");
+    assert_no_secrets(&stderr, "stderr");
+    assert!(stderr.contains("dipper:"), "{stderr}");
+    let conn = duckdb::Connection::open(store_path(dir.path())).unwrap();
+    let error: Option<String> = conn
+        .query_row("SELECT error FROM \"_dipper_runs\"", [], |row| row.get(0))
+        .unwrap();
+    assert_no_secrets(&error.unwrap_or_default(), "runs");
+}
+
+#[test]
+fn dip_without_format_keeps_table_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .arg("dip")
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = texts(&output);
+    assert!(stdout.contains("dip"), "{stdout}");
+    assert!(stdout.contains("rows"), "{stdout}");
+    assert!(stdout.contains("status"), "{stdout}");
+    assert!(stdout.contains("1 of 1 dips OK"), "{stdout}");
+    assert!(serde_json::from_slice::<serde_json::Value>(stdout.as_bytes()).is_err());
+}
+
+#[test]
+fn replace_table_with_zero_rows_and_no_table_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_db, config) = events_config(dir.path(), "");
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(period_args("260101", "260101", &["--replace-table"]))
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (_, stderr) = texts(&output);
+    assert!(stderr.contains("0 rows"), "{stderr}");
+    assert!(stderr.contains("choose a different period"), "{stderr}");
+    let store = store_path(dir.path());
+    if store.exists() {
+        let conn = duckdb::Connection::open(&store).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND lower(table_name) = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+        assert!(slice_rows(&store, "events").is_empty());
+        assert_eq!(run_count(&store), 0);
+    }
+}

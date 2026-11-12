@@ -38,6 +38,8 @@ flowchart LR
 
 Dipper is in early development. There is no installable release yet. Installation and usage instructions will be added later.
 
+`dipper dip` and `dipper ontology pull` can print one JSON document with `--format json`. The field list is in [docs/CLI_JSON.md](docs/CLI_JSON.md).
+
 ## Contributing
 
 Issues and pull requests are welcome. If you have a question, an idea, or a fix, please open an issue or a pull request.
