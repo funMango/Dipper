@@ -4,6 +4,22 @@ use clap::{Parser, Subcommand};
 
 use crate::error::DipperError;
 
+/// stdout shape. The default `table` output is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    Table,
+    Json,
+}
+
+impl std::fmt::Display for OutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Table => "table",
+            Self::Json => "json",
+        })
+    }
+}
+
 /// Command-line interface for Dipper.
 #[derive(Debug, Parser)]
 #[command(
@@ -43,6 +59,9 @@ pub enum OntologyCommand {
         /// `OWNER.TABLE`. SQLite may use the table name alone (`main` is the owner).
         #[arg(long)]
         table: Option<String>,
+        /// stdout format. `table` matches the previous line-oriented output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
     },
     /// Write `ontology/md` from extracted JSON plus any overlay.
     Render,
@@ -84,6 +103,9 @@ pub enum Command {
         /// Reload the requested window and replace only that range in the local table.
         #[arg(long)]
         refresh: bool,
+        /// stdout format. `table` is the summary table. `json` is one document.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
     },
     /// Read a source dictionary into ontology JSON, or check and render it.
     Ontology {
@@ -127,6 +149,7 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
             yes,
             replace_table,
             refresh,
+            format,
         } => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
@@ -144,6 +167,7 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
                     replace_table,
                     refresh,
                 },
+                format,
                 &mut handle,
             )
         }
@@ -151,12 +175,17 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             match action {
-                OntologyCommand::Pull { source, table } => crate::commands::ontology::pull(
+                OntologyCommand::Pull {
+                    source,
+                    table,
+                    format,
+                } => crate::commands::ontology::pull(
                     &cli.config,
                     &source,
                     table.as_deref(),
                     cli.log_sql,
                     cli.strict,
+                    format,
                     &mut handle,
                 ),
                 OntologyCommand::Render => {
