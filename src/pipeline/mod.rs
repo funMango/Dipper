@@ -409,16 +409,10 @@ fn run_period_one(
     let paging = paging_name(job.dip.paging);
     let attempt = attempt_period(config, job, store, opts, opener, progress, events);
     let finished_at = SystemTime::now();
-    let mut result = attempt.result.map_err(|message| {
-        let hidden = crate::output::redact_with_config(config, &message);
-        // Keep the original after the withheld text so the table and JSON
-        // still pass through hide_text. The ledger stores only the withheld half.
-        crate::output::pack_redacted(hidden, &message)
-    });
-    let record_error = result
-        .as_ref()
-        .err()
-        .map(|message| crate::output::ledger_error(message));
+    let mut result = attempt
+        .result
+        .map_err(|message| crate::output::redact_with_config(config, &message));
+    let record_error = result.as_ref().err().cloned();
     let load_mode = match job.kind {
         PeriodKind::Fill => "fill",
         PeriodKind::Refresh => "refresh",
@@ -1163,6 +1157,62 @@ columns = ["ORDER_ID", "TS"]
             .unwrap();
         assert_no_leak("runs", &stored);
         assert!(stored.contains(crate::output::SECRET_WITHHELD), "{stored}");
+    }
+
+    #[test]
+    fn period_outcome_result_keeps_only_the_withheld_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store_path) = secret_config(dir.path());
+        let config = crate::config::load(&config_path).unwrap();
+        let store = reopen(&store_path, dir.path());
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 8, 21)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 8, 22)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let job = PeriodJob {
+            dip: config.dips[0].clone(),
+            time_column: "TS".to_string(),
+            exact: false,
+            request_start: start,
+            request_end: end,
+            holes: vec![(start, end)],
+            kind: PeriodKind::Fill,
+        };
+        let opener = ProbeOpener {
+            calls: Arc::new(Mutex::new(Calls::default())),
+            fail_open: None,
+            findings: Vec::new(),
+            preflight: Vec::new(),
+            rows: vec![vec![Value::Int(1)]],
+            fail_select: true,
+            select_error: Some(leak_message()),
+        };
+        let mut progress = progress::LogProgress::new(Vec::<u8>::new(), 1000);
+        let mut events = Vec::new();
+        let report = run_period(
+            &config,
+            &[job],
+            &store,
+            &RunOptions {
+                fail_fast: false,
+                strict: false,
+                log: crate::source::SqlLogSink::Off,
+            },
+            &opener,
+            &mut progress,
+            &mut events,
+        );
+        let message = report.outcomes[0].result.as_ref().unwrap_err();
+        assert_no_leak("outcome", message);
+        assert!(!message.contains('\u{1e}'), "{message}");
+        assert!(
+            message.contains(crate::output::SECRET_WITHHELD),
+            "{message}"
+        );
     }
 
     #[test]

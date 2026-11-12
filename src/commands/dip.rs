@@ -723,7 +723,7 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 }
 
 fn hide_text(text: &str, secrets: &[crate::output::KnownSecret]) -> String {
-    crate::output::display_error(text, secrets)
+    crate::output::redact_known_values(text, secrets)
 }
 
 fn kind_clone(kind: &PeriodKind) -> PeriodKind {

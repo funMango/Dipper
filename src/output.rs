@@ -11,13 +11,6 @@ pub const SECRET_WITHHELD: &str = "details withheld";
 
 const ALREADY_HIDDEN_DRIVER: &str = "(driver message hidden because it contained the password)";
 
-/// Separates the withheld text from the original message.
-///
-/// `run_period_one` redacts the outcome, then keeps the original after this
-/// separator so `hide_text` still redacts what the table and JSON print.
-/// The ledger stores only the text before the separator.
-const ORIGINAL_SEP: char = '\u{1e}';
-
 /// One configured value that must not appear in command output.
 pub struct KnownSecret {
     pub value: String,
@@ -76,30 +69,6 @@ pub fn oracle_secret_values(config: &Config) -> Vec<KnownSecret> {
 /// Hide known Oracle secrets in `message`.
 pub fn redact_with_config(config: &Config, message: &str) -> String {
     redact_known_values(message, &oracle_secret_values(config))
-}
-
-/// Redacted text, with the original message attached when it changed.
-pub fn pack_redacted(hidden: String, original: &str) -> String {
-    if hidden == original {
-        hidden
-    } else {
-        format!("{hidden}{ORIGINAL_SEP}{original}")
-    }
-}
-
-/// Text stored in `_dipper_runs.error`: the withheld half only.
-pub fn ledger_error(packed: &str) -> String {
-    packed
-        .split(ORIGINAL_SEP)
-        .next()
-        .unwrap_or(packed)
-        .to_string()
-}
-
-/// What stdout shows. Uses the original half when it was attached.
-pub fn display_error(packed: &str, secrets: &[KnownSecret]) -> String {
-    let original = packed.split(ORIGINAL_SEP).nth(1).unwrap_or(packed);
-    redact_known_values(original, secrets)
 }
 
 /// Redact every dip or ontology error before it is printed or stored.
