@@ -676,7 +676,7 @@ mod tests {
         sources.insert(
             "company".to_string(),
             SourceConfig::Oracle {
-                connect: "127.0.0.1:1521/NOPE".to_string(),
+                connect: "127.0.0.1:1521/DIPPERSVC".to_string(),
                 user: "reader".to_string(),
                 password: Secret::new("hidden".to_string()),
                 call_timeout_secs: 300,
@@ -919,7 +919,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Calls::default()));
         let opener = ProbeOpener {
             calls,
-            fail_open: Some("connect 127.0.0.1:1521/NOPE user reader password hidden".to_string()),
+            fail_open: Some("connect 127.0.0.1:1521/DIPPERSVC user reader password hidden".to_string()),
             findings: Vec::new(),
             preflight: Vec::new(),
             rows: Vec::new(),
@@ -928,12 +928,12 @@ mod tests {
         };
         let (report, store) = run_probe(vec![dip("orders", "company")], &opener, false, false);
         let err = report.outcomes[0].result.as_ref().unwrap_err();
-        assert!(!err.contains("127.0.0.1:1521/NOPE"), "{err}");
+        assert!(!err.contains("127.0.0.1:1521/DIPPERSVC"), "{err}");
         assert!(!err.contains("reader"), "{err}");
         assert!(!err.contains("hidden"), "{err}");
         assert!(err.contains(crate::output::SECRET_WITHHELD), "{err}");
         let stored = store.testing_runs().unwrap()[0].error.clone().unwrap();
-        assert!(!stored.contains("127.0.0.1:1521/NOPE"), "{stored}");
+        assert!(!stored.contains("127.0.0.1:1521/DIPPERSVC"), "{stored}");
         assert!(!stored.contains("reader"), "{stored}");
         assert!(!stored.contains("hidden"), "{stored}");
     }
