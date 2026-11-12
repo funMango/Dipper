@@ -2626,8 +2626,20 @@ fn replace_table_with_zero_rows_and_no_table_creates_nothing() {
                 |row| row.get(0),
             )
             .unwrap();
+        let slices: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM \"_dipper_slices\" WHERE dip = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let runs: i64 = conn
+            .query_row("SELECT count(*) FROM \"_dipper_runs\"", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(tables, 0);
-        assert!(slice_rows(&store, "events").is_empty());
-        assert_eq!(run_count(&store), 0);
+        assert_eq!(slices, 0);
+        assert_eq!(runs, 0);
     }
 }
