@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{self, SourceConfig};
 use crate::error::DipperError;
 use crate::ontology::schema::{ontology_error, FieldStatus, OntologyColumn, OntologyDoc, VERSION};
-use crate::source::{open, CatalogColumn, CatalogTable, OpenOptions, SqlLogSink};
+use crate::pipeline::SourceOpener;
+use crate::source::{CatalogColumn, CatalogTable, OpenOptions, SqlLogSink};
 
 pub fn pull(
     config_path: &Path,
@@ -14,6 +15,7 @@ pub fn pull(
     table: Option<&str>,
     log_sql: bool,
     strict: bool,
+    opener: &dyn SourceOpener,
 ) -> Result<Vec<PathBuf>, DipperError> {
     let config = config::load(config_path)?;
     let source_cfg = config
@@ -21,7 +23,7 @@ pub fn pull(
         .get(source_name)
         .ok_or_else(|| ontology_error(format!("unknown source: {source_name}")))?;
     let targets = tables_for(&config, source_name, source_cfg, table)?;
-    let opened = open(
+    let opened = opener.open(
         source_name,
         source_cfg,
         &OpenOptions {

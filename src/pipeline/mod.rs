@@ -409,10 +409,11 @@ fn run_period_one(
     let paging = paging_name(job.dip.paging);
     let attempt = attempt_period(config, job, store, opts, opener, progress, events);
     let finished_at = SystemTime::now();
-    let mut result = attempt
-        .result
-        .map_err(|message| crate::output::redact_with_config(config, &message));
-    let record_error = result.as_ref().err().cloned();
+    let mut result = attempt.result;
+    let record_error = result
+        .as_ref()
+        .err()
+        .map(|message| crate::output::redact_with_config(config, message));
     let load_mode = match job.kind {
         PeriodKind::Fill => "fill",
         PeriodKind::Refresh => "refresh",
@@ -675,7 +676,7 @@ mod tests {
         sources.insert(
             "company".to_string(),
             SourceConfig::Oracle {
-                connect: "127.0.0.1:1/NOPE".to_string(),
+                connect: "127.0.0.1:1521/NOPE".to_string(),
                 user: "reader".to_string(),
                 password: Secret::new("hidden".to_string()),
                 call_timeout_secs: 300,
@@ -737,6 +738,7 @@ mod tests {
         preflight_findings: Vec<Finding>,
         rows: Vec<Vec<Value>>,
         fail_select: bool,
+        select_error: Option<String>,
     }
 
     impl Source for ProbeSource {
@@ -770,7 +772,10 @@ mod tests {
             if self.fail_select {
                 return Err(DipperError::Source {
                     source_name: "sample".to_string(),
-                    message: "select should not run".to_string(),
+                    message: self
+                        .select_error
+                        .clone()
+                        .unwrap_or_else(|| "select should not run".to_string()),
                 });
             }
             let chunk = Chunk {
@@ -798,6 +803,7 @@ mod tests {
         preflight: Vec<Finding>,
         rows: Vec<Vec<Value>>,
         fail_select: bool,
+        select_error: Option<String>,
     }
 
     impl SourceOpener for ProbeOpener {
@@ -819,6 +825,7 @@ mod tests {
                     preflight_findings: self.preflight.clone(),
                     rows: self.rows.clone(),
                     fail_select: self.fail_select,
+                    select_error: self.select_error.clone(),
                 }),
                 findings: self.findings.clone(),
             })
@@ -884,6 +891,7 @@ mod tests {
             preflight: Vec::new(),
             rows: Vec::new(),
             fail_select: true,
+            select_error: None,
         };
         let (report, store) = run_probe(vec![dip("orders", "sample")], &opener, false, false);
         let calls = calls.lock().unwrap();
@@ -911,20 +919,21 @@ mod tests {
         let calls = Arc::new(Mutex::new(Calls::default()));
         let opener = ProbeOpener {
             calls,
-            fail_open: Some("connect 127.0.0.1:1/NOPE user reader password hidden".to_string()),
+            fail_open: Some("connect 127.0.0.1:1521/NOPE user reader password hidden".to_string()),
             findings: Vec::new(),
             preflight: Vec::new(),
             rows: Vec::new(),
             fail_select: true,
+            select_error: None,
         };
         let (report, store) = run_probe(vec![dip("orders", "company")], &opener, false, false);
         let err = report.outcomes[0].result.as_ref().unwrap_err();
-        assert!(!err.contains("127.0.0.1:1/NOPE"), "{err}");
+        assert!(!err.contains("127.0.0.1:1521/NOPE"), "{err}");
         assert!(!err.contains("reader"), "{err}");
         assert!(!err.contains("hidden"), "{err}");
-        assert!(err.contains("***"), "{err}");
+        assert!(err.contains(crate::output::SECRET_WITHHELD), "{err}");
         let stored = store.testing_runs().unwrap()[0].error.clone().unwrap();
-        assert!(!stored.contains("127.0.0.1:1/NOPE"), "{stored}");
+        assert!(!stored.contains("127.0.0.1:1521/NOPE"), "{stored}");
         assert!(!stored.contains("reader"), "{stored}");
         assert!(!stored.contains("hidden"), "{stored}");
     }
@@ -939,6 +948,7 @@ mod tests {
             preflight: vec![finding(Level::Refuse, "object not found: NOPE")],
             rows: vec![vec![Value::Int(1)]],
             fail_select: true,
+            select_error: None,
         };
         let (report, store) = run_probe(vec![dip("orders", "sample")], &opener, false, false);
         assert_eq!(calls.lock().unwrap().select, 0);
@@ -961,6 +971,7 @@ mod tests {
             preflight: vec![finding(Level::Warn, "target is a view (V_ORDERS)")],
             rows: vec![vec![Value::Int(1)]],
             fail_select: true,
+            select_error: None,
         };
         let (report, _) = run_probe(vec![dip("orders", "sample")], &opener, true, false);
         assert_eq!(calls.lock().unwrap().select, 0);
@@ -978,6 +989,7 @@ mod tests {
             preflight: vec![finding(Level::Warn, "target is a view (V_ORDERS)")],
             rows: vec![vec![Value::Int(1)]],
             fail_select: false,
+            select_error: None,
         };
         let (report, store) = run_probe(vec![dip("orders", "sample")], &opener, false, false);
         assert_eq!(calls.lock().unwrap().select, 1);
@@ -995,6 +1007,7 @@ mod tests {
             preflight: Vec::new(),
             rows: vec![vec![Value::Int(1)], vec![Value::Int(2)]],
             fail_select: false,
+            select_error: None,
         };
         let mut counted = dip("orders", "sample");
         counted.count_first = true;
@@ -1011,6 +1024,7 @@ mod tests {
             preflight: vec![finding(Level::Refuse, "object not found: NOPE")],
             rows: Vec::new(),
             fail_select: true,
+            select_error: None,
         };
         let (report, store) = run_probe(
             vec![dip("orders", "sample"), dip("items", "sample")],
@@ -1022,5 +1036,213 @@ mod tests {
         assert_eq!(report.failed(), 1);
         assert_eq!(report.total(), 2);
         assert_eq!(store.testing_runs().unwrap().len(), 1);
+    }
+
+    const LEAK_PASSWORD: &str = "secret-value";
+    const LEAK_CONNECT: &str = "db.example:1521/SVC";
+
+    fn leak_message() -> String {
+        format!("DPI-1047: Reader at {LEAK_CONNECT} password {LEAK_PASSWORD}")
+    }
+
+    fn assert_no_leak(label: &str, text: &str) {
+        for needle in [
+            "Reader",
+            "reader",
+            "db.example",
+            "1521",
+            "SVC",
+            LEAK_PASSWORD,
+            LEAK_CONNECT,
+        ] {
+            assert!(!text.contains(needle), "{label} still has {needle}: {text}");
+        }
+    }
+
+    fn secret_config(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        std::env::set_var("DIPPER_PR8_SECRET", LEAK_PASSWORD);
+        let store = dir.join("store.duckdb");
+        let store_text = store.to_string_lossy().replace('\\', "/");
+        let temp = dir.join("tmp");
+        let temp_text = temp.to_string_lossy().replace('\\', "/");
+        let path = dir.join("dipper.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+store = "{store_text}"
+[performance]
+batch_rows = 10
+memory_limit = "64MiB"
+temp_directory = "{temp_text}"
+progress_every_rows = 1000
+[sources.company]
+kind = "oracle"
+connect = "{LEAK_CONNECT}"
+user = "Reader"
+password = "${{DIPPER_PR8_SECRET}}"
+[[dips]]
+name = "orders"
+source = "company"
+table = "SALES.ORDERS"
+columns = ["ORDER_ID", "TS"]
+"#
+            ),
+        )
+        .unwrap();
+        (path, store)
+    }
+
+    fn reopen(store: &std::path::Path, dir: &std::path::Path) -> Store {
+        Store::open(
+            store,
+            &Performance {
+                batch_rows: 10,
+                memory_limit: "64MiB".to_string(),
+                temp_directory: dir.join("tmp"),
+                progress_every_rows: 1000,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn period_json_stderr_and_runs_hide_probe_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, store_path) = secret_config(dir.path());
+        let opener = ProbeOpener {
+            calls: Arc::new(Mutex::new(Calls::default())),
+            fail_open: None,
+            findings: Vec::new(),
+            preflight: Vec::new(),
+            rows: vec![vec![Value::Int(1)]],
+            fail_select: true,
+            select_error: Some(leak_message()),
+        };
+        let mut stdout = Vec::new();
+        let err = crate::commands::dip::run_with_opener(
+            &config,
+            &[],
+            false,
+            false,
+            false,
+            crate::commands::dip::PeriodCli {
+                from: Some("260821".to_string()),
+                to: Some("260821".to_string()),
+                time_column: Some("TS".to_string()),
+                yes: true,
+                replace_table: false,
+                refresh: false,
+            },
+            crate::cli::OutputFormat::Json,
+            &opener,
+            &mut stdout,
+        )
+        .unwrap_err();
+        let stdout = String::from_utf8(stdout).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        let dip_error = doc["dips"][0]["error"].as_str().unwrap();
+        assert_no_leak("json", &stdout);
+        assert_no_leak("dip error", dip_error);
+        assert!(
+            dip_error.contains(crate::output::SECRET_WITHHELD),
+            "{dip_error}"
+        );
+        let dipper = format!("dipper: {err}");
+        assert_no_leak("stderr", &dipper);
+        let stored = reopen(&store_path, dir.path()).testing_runs().unwrap()[0]
+            .error
+            .clone()
+            .unwrap();
+        assert_no_leak("runs", &stored);
+        assert!(stored.contains(crate::output::SECRET_WITHHELD), "{stored}");
+    }
+
+    #[test]
+    fn preview_failure_json_and_stderr_hide_probe_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, store_path) = secret_config(dir.path());
+        let opener = ProbeOpener {
+            calls: Arc::new(Mutex::new(Calls::default())),
+            fail_open: Some(leak_message()),
+            findings: Vec::new(),
+            preflight: Vec::new(),
+            rows: Vec::new(),
+            fail_select: false,
+            select_error: None,
+        };
+        let mut stdout = Vec::new();
+        let err = crate::commands::dip::run_with_opener(
+            &config,
+            &[],
+            false,
+            false,
+            false,
+            crate::commands::dip::PeriodCli {
+                from: Some("260821".to_string()),
+                to: Some("260821".to_string()),
+                time_column: Some("TS".to_string()),
+                yes: true,
+                replace_table: false,
+                refresh: false,
+            },
+            crate::cli::OutputFormat::Json,
+            &opener,
+            &mut stdout,
+        )
+        .unwrap_err();
+        let stdout = String::from_utf8(stdout).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        let message = doc["error"]["message"].as_str().unwrap();
+        assert_no_leak("json", &stdout);
+        assert!(
+            message.contains(crate::output::SECRET_WITHHELD),
+            "{message}"
+        );
+        let dipper = format!("dipper: {err}");
+        assert_no_leak("stderr", &dipper);
+        assert!(dipper.contains(crate::output::SECRET_WITHHELD), "{dipper}");
+        assert!(reopen(&store_path, dir.path())
+            .testing_runs()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn ontology_json_and_stderr_hide_probe_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = secret_config(dir.path());
+        let opener = ProbeOpener {
+            calls: Arc::new(Mutex::new(Calls::default())),
+            fail_open: Some(leak_message()),
+            findings: Vec::new(),
+            preflight: Vec::new(),
+            rows: Vec::new(),
+            fail_select: false,
+            select_error: None,
+        };
+        let mut stdout = Vec::new();
+        let err = crate::commands::ontology::pull_with_opener(
+            &config,
+            "company",
+            Some("SALES.ORDERS"),
+            false,
+            false,
+            crate::cli::OutputFormat::Json,
+            &opener,
+            &mut stdout,
+        )
+        .unwrap_err();
+        let stdout = String::from_utf8(stdout).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        let message = doc["error"]["message"].as_str().unwrap();
+        assert_no_leak("json", &stdout);
+        assert!(
+            message.contains(crate::output::SECRET_WITHHELD),
+            "{message}"
+        );
+        let dipper = format!("dipper: {err}");
+        assert_no_leak("stderr", &dipper);
+        assert!(dipper.contains(crate::output::SECRET_WITHHELD), "{dipper}");
     }
 }

@@ -17,7 +17,7 @@ use crate::config::{
 use crate::error::DipperError;
 use crate::pipeline::{
     self, progress, spec_for, DefaultOpener, DipOutcome, PeriodJob, PeriodKind, RunOptions,
-    RunReport,
+    RunReport, SourceOpener,
 };
 use crate::source::{Level, OpenOptions, SqlLogSink};
 use crate::store::{HalfOpen, SliceRow, Store};
@@ -41,6 +41,57 @@ pub fn run(
     log_sql: bool,
     period: PeriodCli,
     format: OutputFormat,
+    out: &mut dyn Write,
+) -> Result<(), DipperError> {
+    run_inner(
+        config_path,
+        names,
+        fail_fast,
+        strict,
+        log_sql,
+        period,
+        format,
+        &DefaultOpener,
+        out,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_opener(
+    config_path: &Path,
+    names: &[String],
+    fail_fast: bool,
+    strict: bool,
+    log_sql: bool,
+    period: PeriodCli,
+    format: OutputFormat,
+    opener: &dyn SourceOpener,
+    out: &mut dyn Write,
+) -> Result<(), DipperError> {
+    run_inner(
+        config_path,
+        names,
+        fail_fast,
+        strict,
+        log_sql,
+        period,
+        format,
+        opener,
+        out,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner(
+    config_path: &Path,
+    names: &[String],
+    fail_fast: bool,
+    strict: bool,
+    log_sql: bool,
+    period: PeriodCli,
+    format: OutputFormat,
+    opener: &dyn SourceOpener,
     out: &mut dyn Write,
 ) -> Result<(), DipperError> {
     let request = match period_request(&period) {
@@ -95,12 +146,12 @@ pub fn run(
             &selected,
             &store,
             &opts,
-            &DefaultOpener,
+            opener,
             progress.as_mut(),
             &mut stderr,
         );
         let entries = entries_from_report(&report, &selected, &secrets);
-        return emit_finished(format, out, &report, None, entries);
+        return emit_finished(format, out, &report, None, entries, &secrets);
     };
 
     let (period_doc, window, request_start, request_end) =
@@ -288,7 +339,7 @@ pub fn run(
                     return finish_error(format, out, dip_err(err), &secrets, Some(period_doc))
                 }
             };
-            let count = match preview_count(&config, &prepared.dip, strict, log.clone()) {
+            let count = match preview_count(&config, &prepared.dip, strict, log.clone(), opener) {
                 Ok(count) => count,
                 Err(err) => return finish_error(format, out, err, &secrets, Some(period_doc)),
             };
@@ -363,12 +414,12 @@ pub fn run(
         &jobs,
         &store,
         &opts,
-        &DefaultOpener,
+        opener,
         progress.as_mut(),
         &mut stderr,
     );
     let entries = entries_from_plans(&plans, &report, period.refresh, &secrets);
-    emit_finished(format, out, &report, Some(period_doc), entries)
+    emit_finished(format, out, &report, Some(period_doc), entries, &secrets)
 }
 
 struct Plan {
@@ -415,7 +466,7 @@ fn finish_error(
     format: OutputFormat,
     out: &mut dyn Write,
     error: DipperError,
-    secrets: &[String],
+    secrets: &[crate::output::KnownSecret],
     period: Option<PeriodBody>,
 ) -> Result<(), DipperError> {
     let error = redact_error(error, secrets);
@@ -425,34 +476,8 @@ fn finish_error(
     Err(error)
 }
 
-fn redact_error(error: DipperError, secrets: &[String]) -> DipperError {
-    if secrets.is_empty() {
-        return error;
-    }
-    let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    let hide = |message: String| crate::output::redact_known_values(&message, &refs);
-    match error {
-        DipperError::Source {
-            source_name,
-            message,
-        } => DipperError::Source {
-            source_name,
-            message: hide(message),
-        },
-        DipperError::Store { message } => DipperError::Store {
-            message: hide(message),
-        },
-        DipperError::Refused {
-            source_name,
-            dip,
-            message,
-        } => DipperError::Refused {
-            source_name,
-            dip,
-            message: hide(message),
-        },
-        other => other,
-    }
+fn redact_error(error: DipperError, secrets: &[crate::output::KnownSecret]) -> DipperError {
+    crate::output::redact_error(error, secrets)
 }
 
 fn emit_finished(
@@ -461,9 +486,10 @@ fn emit_finished(
     report: &RunReport,
     period: Option<PeriodBody>,
     dips: Vec<DipBody>,
+    secrets: &[crate::output::KnownSecret],
 ) -> Result<(), DipperError> {
     if format == OutputFormat::Table {
-        return write_report(out, report);
+        return write_report(out, report, secrets);
     }
     let exit_code = if report.failed() == 0 { 0 } else { 1 };
     let doc = DipDocument {
@@ -508,7 +534,7 @@ fn write_success_json(
 fn entries_from_report(
     report: &RunReport,
     selected: &[&crate::config::Dip],
-    secrets: &[String],
+    secrets: &[crate::output::KnownSecret],
 ) -> Vec<DipBody> {
     let mut dips = Vec::new();
     for outcome in &report.outcomes {
@@ -529,7 +555,7 @@ fn entries_from_plans(
     plans: &[Plan],
     report: &RunReport,
     refresh: bool,
-    secrets: &[String],
+    secrets: &[crate::output::KnownSecret],
 ) -> Vec<DipBody> {
     plans
         .iter()
@@ -559,7 +585,7 @@ fn plan_entry(
     status: &str,
     refresh: bool,
     outcome: Option<&DipOutcome>,
-    secrets: &[String],
+    secrets: &[crate::output::KnownSecret],
 ) -> DipBody {
     if let Some(outcome) = outcome {
         outcome_entry(
@@ -589,7 +615,7 @@ fn outcome_entry(
     ignored: &[Filter],
     held: &[HalfOpen],
     fetch: &[FetchBody],
-    secrets: &[String],
+    secrets: &[crate::output::KnownSecret],
 ) -> DipBody {
     let status = if outcome.result.is_ok() {
         "ok"
@@ -696,9 +722,8 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
     }
 }
 
-fn hide_text(text: &str, secrets: &[String]) -> String {
-    let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    crate::output::redact_known_values(text, &refs)
+fn hide_text(text: &str, secrets: &[crate::output::KnownSecret]) -> String {
+    crate::output::redact_known_values(text, secrets)
 }
 
 fn kind_clone(kind: &PeriodKind) -> PeriodKind {
@@ -810,12 +835,13 @@ fn preview_count(
     dip: &crate::config::Dip,
     strict: bool,
     log: SqlLogSink,
+    opener: &dyn SourceOpener,
 ) -> Result<u64, DipperError> {
     let source_cfg = config
         .sources
         .get(&dip.source)
         .ok_or_else(|| dip_err(format!("unknown source: {}", dip.source)))?;
-    let opened = crate::source::open(
+    let opened = opener.open(
         &dip.source,
         source_cfg,
         &OpenOptions {
@@ -929,7 +955,11 @@ pub(crate) fn accepts_confirmation(line: &str) -> bool {
     answer == "y" || answer == "Y"
 }
 
-fn write_report(out: &mut dyn Write, report: &pipeline::RunReport) -> Result<(), DipperError> {
+fn write_report(
+    out: &mut dyn Write,
+    report: &pipeline::RunReport,
+    secrets: &[crate::output::KnownSecret],
+) -> Result<(), DipperError> {
     if report.outcomes.is_empty() && report.not_run.is_empty() {
         write_line(out, "0 of 0 dips OK")?;
         return Ok(());
@@ -943,15 +973,15 @@ fn write_report(out: &mut dyn Write, report: &pipeline::RunReport) -> Result<(),
             .result
             .as_ref()
             .err()
-            .map(String::as_str)
-            .unwrap_or("");
+            .map(|message| hide_text(message, secrets))
+            .unwrap_or_default();
         table.add_row(vec![
             outcome.dip.clone(),
             outcome.source.clone(),
             outcome.rows.to_string(),
             format!("{:.1}", outcome.elapsed.as_secs_f64()),
             status.to_string(),
-            error.to_string(),
+            error,
         ]);
     }
     write_line(out, table.to_string().trim_end())?;

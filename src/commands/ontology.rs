@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::cli::OutputFormat;
 use crate::error::DipperError;
 use crate::ontology::{self, render, validate};
+use crate::pipeline::{DefaultOpener, SourceOpener};
 
 pub fn pull(
     config_path: &Path,
@@ -18,7 +19,54 @@ pub fn pull(
     format: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<(), DipperError> {
-    match ontology::pull(config_path, source, table, log_sql, strict) {
+    pull_inner(
+        config_path,
+        source,
+        table,
+        log_sql,
+        strict,
+        format,
+        &DefaultOpener,
+        out,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pull_with_opener(
+    config_path: &Path,
+    source: &str,
+    table: Option<&str>,
+    log_sql: bool,
+    strict: bool,
+    format: OutputFormat,
+    opener: &dyn SourceOpener,
+    out: &mut dyn Write,
+) -> Result<(), DipperError> {
+    pull_inner(
+        config_path,
+        source,
+        table,
+        log_sql,
+        strict,
+        format,
+        opener,
+        out,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pull_inner(
+    config_path: &Path,
+    source: &str,
+    table: Option<&str>,
+    log_sql: bool,
+    strict: bool,
+    format: OutputFormat,
+    opener: &dyn SourceOpener,
+    out: &mut dyn Write,
+) -> Result<(), DipperError> {
+    match ontology::pull(config_path, source, table, log_sql, strict, opener) {
         Ok(paths) => {
             let files: Vec<String> = paths
                 .iter()
@@ -105,21 +153,11 @@ fn write_pull_json(
     writeln!(out, "{text}").map_err(write_err)
 }
 
-fn redact_ontology_error(error: DipperError, secrets: &[String]) -> DipperError {
-    if secrets.is_empty() {
-        return error;
-    }
-    let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    match error {
-        DipperError::Source {
-            source_name,
-            message,
-        } => DipperError::Source {
-            source_name,
-            message: crate::output::redact_known_values(&message, &refs),
-        },
-        other => other,
-    }
+fn redact_ontology_error(
+    error: DipperError,
+    secrets: &[crate::output::KnownSecret],
+) -> DipperError {
+    crate::output::redact_error(error, secrets)
 }
 
 fn write_err(err: std::io::Error) -> DipperError {

@@ -8,7 +8,7 @@
 
 Timestamps use `YYYY-MM-DDTHH:MM:SS` with no timezone. A period range is half-open: `start` inclusive, `end` exclusive. An exact instant `T` (`--from T --to T`) is the one-second ledger interval `[T, T+1s)` and `"exact": true`.
 
-JSON does not contain source row values, DuckDB samples, passwords, Oracle connect strings, or Oracle user names. An ignored config filter value is included because it comes from the config file. The same Oracle connect, user, and password values are removed from JSON error strings, from the stderr `dipper:` line, and from `_dipper_runs.error`.
+JSON does not contain source row values, DuckDB samples, passwords, Oracle connect strings, or Oracle user names. An ignored config filter value is included because it comes from the config file. If an error contains the Oracle user (ASCII case-insensitive), password, connect string, or the host, port, or service taken from that connect string, the whole message is replaced with `details withheld`. An `ORA-#####` or `DPI-####` code is kept only when that code does not itself contain one of those values. Percent-encoded connect text is not decoded. The same redaction is applied to JSON errors, the stderr `dipper:` line, and `_dipper_runs.error`.
 
 ## Exit codes
 

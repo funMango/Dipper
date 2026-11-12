@@ -934,7 +934,7 @@ fn oracle_password_never_appears_in_dip_output() {
 store = ".dipper/store.duckdb"
 [sources.company]
 kind = "oracle"
-connect = "127.0.0.1:1/NOPE"
+connect = "127.0.0.1:1521/NOPE"
 user = "reader"
 password = "${DIPPER_PR3B_PASSWORD}"
 [[dips]]
@@ -2169,7 +2169,7 @@ fn json_doc(stdout: &str) -> serde_json::Value {
 fn assert_no_secrets(text: &str, label: &str) {
     assert!(!text.contains("PR2-canary-7f1d9c"), "{label}: {text}");
     assert!(!text.contains("reader"), "{label}: {text}");
-    assert!(!text.contains("127.0.0.1:1/NOPE"), "{label}: {text}");
+    assert!(!text.contains("127.0.0.1:1521/NOPE"), "{label}: {text}");
 }
 
 #[test]
@@ -2507,7 +2507,7 @@ fn dip_json_hides_oracle_password_user_and_connect() {
 store = ".dipper/store.duckdb"
 [sources.company]
 kind = "oracle"
-connect = "127.0.0.1:1/NOPE"
+connect = "127.0.0.1:1521/NOPE"
 user = "reader"
 password = "${DIPPER_PR3B_PASSWORD}"
 [[dips]]
@@ -2548,7 +2548,7 @@ fn oracle_secrets_are_redacted_without_format() {
 store = ".dipper/store.duckdb"
 [sources.company]
 kind = "oracle"
-connect = "127.0.0.1:1/NOPE"
+connect = "127.0.0.1:1521/NOPE"
 user = "reader"
 password = "${DIPPER_PR3B_PASSWORD}"
 [[dips]]
