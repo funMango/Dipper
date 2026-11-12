@@ -919,7 +919,9 @@ mod tests {
         let calls = Arc::new(Mutex::new(Calls::default()));
         let opener = ProbeOpener {
             calls,
-            fail_open: Some("connect 127.0.0.1:1521/DIPPERSVC user reader password hidden".to_string()),
+            fail_open: Some(
+                "connect 127.0.0.1:1521/DIPPERSVC user reader password hidden".to_string(),
+            ),
             findings: Vec::new(),
             preflight: Vec::new(),
             rows: Vec::new(),
