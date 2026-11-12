@@ -409,11 +409,16 @@ fn run_period_one(
     let paging = paging_name(job.dip.paging);
     let attempt = attempt_period(config, job, store, opts, opener, progress, events);
     let finished_at = SystemTime::now();
-    let mut result = attempt.result;
+    let mut result = attempt.result.map_err(|message| {
+        let hidden = crate::output::redact_with_config(config, &message);
+        // Keep the original after the withheld text so the table and JSON
+        // still pass through hide_text. The ledger stores only the withheld half.
+        crate::output::pack_redacted(hidden, &message)
+    });
     let record_error = result
         .as_ref()
         .err()
-        .map(|message| crate::output::redact_with_config(config, message));
+        .map(|message| crate::output::ledger_error(message));
     let load_mode = match job.kind {
         PeriodKind::Fill => "fill",
         PeriodKind::Refresh => "refresh",
@@ -1158,6 +1163,47 @@ columns = ["ORDER_ID", "TS"]
             .unwrap();
         assert_no_leak("runs", &stored);
         assert!(stored.contains(crate::output::SECRET_WITHHELD), "{stored}");
+    }
+
+    #[test]
+    fn period_table_stdout_and_stderr_hide_probe_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = secret_config(dir.path());
+        let opener = ProbeOpener {
+            calls: Arc::new(Mutex::new(Calls::default())),
+            fail_open: None,
+            findings: Vec::new(),
+            preflight: Vec::new(),
+            rows: vec![vec![Value::Int(1)]],
+            fail_select: true,
+            select_error: Some(leak_message()),
+        };
+        let mut stdout = Vec::new();
+        let err = crate::commands::dip::run_with_opener(
+            &config,
+            &[],
+            false,
+            false,
+            false,
+            crate::commands::dip::PeriodCli {
+                from: Some("260821".to_string()),
+                to: Some("260821".to_string()),
+                time_column: Some("TS".to_string()),
+                yes: true,
+                replace_table: false,
+                refresh: false,
+            },
+            crate::cli::OutputFormat::Table,
+            &opener,
+            &mut stdout,
+        )
+        .unwrap_err();
+        let stdout = String::from_utf8(stdout).unwrap();
+        assert!(stdout.contains("FAIL"), "{stdout}");
+        assert!(stdout.contains(crate::output::SECRET_WITHHELD), "{stdout}");
+        assert_no_leak("stdout", &stdout);
+        let dipper = format!("dipper: {err}");
+        assert_no_leak("stderr", &dipper);
     }
 
     #[test]

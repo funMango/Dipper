@@ -11,6 +11,13 @@ pub const SECRET_WITHHELD: &str = "details withheld";
 
 const ALREADY_HIDDEN_DRIVER: &str = "(driver message hidden because it contained the password)";
 
+/// Separates the withheld text from the original message.
+///
+/// `run_period_one` redacts the outcome, then keeps the original after this
+/// separator so `hide_text` still redacts what the table and JSON print.
+/// The ledger stores only the text before the separator.
+const ORIGINAL_SEP: char = '\u{1e}';
+
 /// One configured value that must not appear in command output.
 pub struct KnownSecret {
     pub value: String,
@@ -20,26 +27,22 @@ pub struct KnownSecret {
 
 /// Replace `text` when it contains any known secret.
 ///
-/// Empty values are ignored. A message that already came from
-/// [`crate::source`] driver redaction, or that is already this function's
-/// withheld text, is returned unchanged. Otherwise the whole message becomes
-/// [`SECRET_WITHHELD`], keeping Oracle `ORA-#####` and `DPI-####` codes that
-/// do not themselves contain a secret.
+/// Empty values are ignored. A message that already came from driver
+/// redaction keeps its wording, but an `ORA-#####` or `DPI-####` code that
+/// itself contains a secret is removed. Otherwise the whole message becomes
+/// [`SECRET_WITHHELD`], keeping only codes that do not contain a secret.
 pub fn redact_known_values(text: &str, secrets: &[KnownSecret]) -> String {
-    if already_withheld(text) {
-        return text.to_string();
-    }
     let active: Vec<&KnownSecret> = secrets
         .iter()
         .filter(|secret| !secret.value.is_empty())
         .collect();
+    if text.contains(ALREADY_HIDDEN_DRIVER) {
+        return hidden_driver_without_secret_codes(text, &active);
+    }
     if active.is_empty() || !active.iter().any(|secret| contains_secret(text, secret)) {
         return text.to_string();
     }
-    let codes: Vec<String> = driver_codes(text)
-        .into_iter()
-        .filter(|code| !active.iter().any(|secret| contains_secret(code, secret)))
-        .collect();
+    let codes = kept_codes(text, &active);
     if codes.is_empty() {
         SECRET_WITHHELD.to_string()
     } else {
@@ -73,6 +76,30 @@ pub fn oracle_secret_values(config: &Config) -> Vec<KnownSecret> {
 /// Hide known Oracle secrets in `message`.
 pub fn redact_with_config(config: &Config, message: &str) -> String {
     redact_known_values(message, &oracle_secret_values(config))
+}
+
+/// Redacted text, with the original message attached when it changed.
+pub fn pack_redacted(hidden: String, original: &str) -> String {
+    if hidden == original {
+        hidden
+    } else {
+        format!("{hidden}{ORIGINAL_SEP}{original}")
+    }
+}
+
+/// Text stored in `_dipper_runs.error`: the withheld half only.
+pub fn ledger_error(packed: &str) -> String {
+    packed
+        .split(ORIGINAL_SEP)
+        .next()
+        .unwrap_or(packed)
+        .to_string()
+}
+
+/// What stdout shows. Uses the original half when it was attached.
+pub fn display_error(packed: &str, secrets: &[KnownSecret]) -> String {
+    let original = packed.split(ORIGINAL_SEP).nth(1).unwrap_or(packed);
+    redact_known_values(original, secrets)
 }
 
 /// Redact every dip or ontology error before it is printed or stored.
@@ -144,10 +171,24 @@ pub fn connect_parts(connect: &str) -> Vec<String> {
     parts
 }
 
-fn already_withheld(text: &str) -> bool {
-    text == SECRET_WITHHELD
-        || text.ends_with(&format!(" {SECRET_WITHHELD}"))
-        || text.contains(ALREADY_HIDDEN_DRIVER)
+fn kept_codes(text: &str, secrets: &[&KnownSecret]) -> Vec<String> {
+    driver_codes(text)
+        .into_iter()
+        .filter(|code| !secrets.iter().any(|secret| contains_secret(code, secret)))
+        .collect()
+}
+
+fn hidden_driver_without_secret_codes(text: &str, secrets: &[&KnownSecret]) -> String {
+    let codes = driver_codes(text);
+    let kept = kept_codes(text, secrets);
+    if kept.len() == codes.len() {
+        return text.to_string();
+    }
+    if kept.is_empty() {
+        format!("driver error {ALREADY_HIDDEN_DRIVER}")
+    } else {
+        format!("{} {ALREADY_HIDDEN_DRIVER}", kept.join(" "))
+    }
 }
 
 fn contains_secret(text: &str, secret: &KnownSecret) -> bool {
@@ -266,8 +307,64 @@ mod tests {
     #[test]
     fn already_hidden_driver_text_is_not_rewritten() {
         let hidden = "ORA-01017 (driver message hidden because it contained the password)";
-        let got = redact_known_values(hidden, &[secret("password"), secret("ORA")]);
+        let got = redact_known_values(hidden, &[secret("password")]);
         assert_eq!(got, hidden);
+    }
+
+    #[test]
+    fn hidden_driver_code_that_contains_the_secret_is_dropped() {
+        let hidden = "DPI-1047 (driver message hidden because it contained the password)";
+        let got = redact_known_values(hidden, &[secret("1047")]);
+        assert!(!got.contains("1047"), "{got}");
+        assert!(!got.contains("DPI-1047"), "{got}");
+        assert_eq!(
+            got,
+            "driver error (driver message hidden because it contained the password)"
+        );
+    }
+
+    #[test]
+    fn oracle_secret_values_hides_host_port_and_service_separately() {
+        use crate::config::{Config, Performance, Secret, SourceConfig};
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "company".to_string(),
+            SourceConfig::Oracle {
+                connect: "db.example:1521/DIPPERSVC".to_string(),
+                user: "Reader".to_string(),
+                password: Secret::new("secret-value".to_string()),
+                call_timeout_secs: 300,
+                max_session_minutes: 480,
+            },
+        );
+        let config = Config {
+            file: PathBuf::from("dipper.toml"),
+            strict_readonly: false,
+            store: PathBuf::from("store.duckdb"),
+            performance: Performance {
+                batch_rows: 10,
+                memory_limit: "64MiB".to_string(),
+                temp_directory: PathBuf::from("tmp"),
+                progress_every_rows: 1000,
+            },
+            sources,
+            dips: Vec::new(),
+        };
+        let secrets = super::oracle_secret_values(&config);
+        for (label, message) in [
+            ("host", "cannot reach db.example today"),
+            ("port", "listener 1521 closed"),
+            ("service", "missing DIPPERSVC"),
+        ] {
+            assert!(!message.contains("Reader"), "{label}");
+            assert!(!message.contains("secret-value"), "{label}");
+            assert!(!message.contains("db.example:1521/DIPPERSVC"), "{label}");
+            let got = redact_known_values(message, &secrets);
+            assert_eq!(got, SECRET_WITHHELD, "{label}: {message} -> {got}");
+        }
     }
 
     #[test]
