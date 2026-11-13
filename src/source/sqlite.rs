@@ -13,11 +13,11 @@ use crate::source::preflight::{blocks, run_sqlite, DictQuery, Dictionary};
 use crate::source::session::{Executor, RowCursor, Session, SessionOptions, SessionStatement};
 use crate::source::watchdog::{Breaker, SystemClock};
 use crate::source::{
-    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogTable, ChunkIter, OpenOptions,
-    Opened, Paging, PreflightReport, SelectSpec, Source, Value,
+    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogForeignKey, CatalogTable,
+    ChunkIter, OpenOptions, Opened, Paging, PreflightReport, SelectSpec, Source, Value,
 };
 use crate::sql::build;
-use crate::sql::guard::{GuardedSelect, SqlDialect};
+use crate::sql::guard::{GuardedSelect, GuardedSql, SqlDialect};
 
 pub struct SqliteSource {
     session: Session<LoggingExecutor<SqliteExec>>,
@@ -148,35 +148,25 @@ impl Executor for SqliteExec {
         &'a self,
         query: &GuardedSelect,
         binds: &[Value],
-        _fetch_rows: usize,
+        fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
-        let statement = Box::new(
-            self.conn
-                .prepare(query.sql())
-                .map_err(|err| self.fail(err))?,
-        );
-        let columns: Vec<String> = statement.column_names().map(str::to_string).collect();
-        let params: Vec<Bound> = binds.iter().cloned().map(Bound).collect();
-        let statement = Box::into_raw(statement);
-        let rows = match unsafe { query_erased(statement, &params) } {
-            Ok(rows) => rows,
-            Err(err) => {
-                // SAFETY: `query` failed before a row stream existed, so nothing borrows
-                // this statement. The pointer came from `Box::into_raw`.
-                unsafe { drop(Box::from_raw(statement)) };
-                return Err(self.fail(err));
-            }
-        };
-        Ok(Box::new(SqliteStream {
-            statement,
-            rows,
-            columns,
-            name: self.name.clone(),
-        }))
+        self.open_statement(query.sql(), binds, fetch_rows)
+    }
+
+    fn open_sql<'a>(
+        &'a self,
+        query: &GuardedSql,
+        binds: &[Value],
+        fetch_rows: usize,
+    ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
+        self.open_statement(query.sql(), binds, fetch_rows)
     }
 
     fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
-        if !sql.starts_with("PRAGMA table_xinfo(\"") || !sql.ends_with("\")") {
+        let allowed = (sql.starts_with("PRAGMA table_xinfo(\"")
+            || sql.starts_with("PRAGMA foreign_key_list(\""))
+            && sql.ends_with("\")");
+        if !allowed {
             return Err(source_error(
                 &self.name,
                 "fixed catalog read is not supported".to_string(),
@@ -206,6 +196,35 @@ impl Executor for SqliteExec {
     }
 }
 
+impl SqliteExec {
+    fn open_statement<'a>(
+        &'a self,
+        sql: &str,
+        binds: &[Value],
+        _fetch_rows: usize,
+    ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
+        let statement = Box::new(self.conn.prepare(sql).map_err(|err| self.fail(err))?);
+        let columns: Vec<String> = statement.column_names().map(str::to_string).collect();
+        let params: Vec<Bound> = binds.iter().cloned().map(Bound).collect();
+        let statement = Box::into_raw(statement);
+        let rows = match unsafe { query_erased(statement, &params) } {
+            Ok(rows) => rows,
+            Err(err) => {
+                // SAFETY: `query` failed before a row stream existed, so nothing borrows
+                // this statement. The pointer came from `Box::into_raw`.
+                unsafe { drop(Box::from_raw(statement)) };
+                return Err(self.fail(err));
+            }
+        };
+        Ok(Box::new(SqliteStream {
+            statement,
+            rows,
+            columns,
+            name: self.name.clone(),
+        }))
+    }
+}
+
 fn pragma_arg_is_ident(value: &str) -> bool {
     let value = value.trim().trim_matches('"');
     crate::sql::validate_column_ident(value).is_ok()
@@ -232,7 +251,10 @@ fn authorize(ctx: AuthContext<'_>) -> Authorization {
         AuthAction::Pragma {
             pragma_name,
             pragma_value: Some(value),
-        } if pragma_name.eq_ignore_ascii_case("table_xinfo") && pragma_arg_is_ident(value) => {
+        } if (pragma_name.eq_ignore_ascii_case("table_xinfo")
+            || pragma_name.eq_ignore_ascii_case("foreign_key_list"))
+            && pragma_arg_is_ident(value) =>
+        {
             Authorization::Allow
         }
         _ => Authorization::Deny,
@@ -469,12 +491,138 @@ impl Source for SqliteSource {
             });
         }
         keyed.sort_by_key(|(position, _)| *position);
+        let foreign_keys = self.sqlite_foreign_keys(table)?;
         Ok(CatalogTable {
             object_type: object_type.to_string(),
             table_comment: None,
             primary_key: keyed.into_iter().map(|(_, name)| name).collect(),
             columns,
+            foreign_keys,
         })
+    }
+
+    fn check_relation(
+        &self,
+        from_owner: &str,
+        from_table: &str,
+        from_columns: &[String],
+        to_owner: &str,
+        to_table: &str,
+        to_columns: &[String],
+    ) -> Result<crate::source::OverlapCounts, DipperError> {
+        if !from_owner.eq_ignore_ascii_case("main") || !to_owner.eq_ignore_ascii_case("main") {
+            return Err(source_error(
+                self.name(),
+                "schema prefix is not allowed; only main is allowed".to_string(),
+            ));
+        }
+        run_overlap(
+            self.name(),
+            SqlDialect::Sqlite,
+            &self.session,
+            from_table,
+            from_columns,
+            to_table,
+            to_columns,
+        )
+    }
+}
+
+fn run_overlap(
+    name: &str,
+    dialect: SqlDialect,
+    session: &Session<LoggingExecutor<SqliteExec>>,
+    from_table: &str,
+    from_columns: &[String],
+    to_table: &str,
+    to_columns: &[String],
+) -> Result<crate::source::OverlapCounts, DipperError> {
+    for column in from_columns.iter().chain(to_columns) {
+        crate::sql::validate_column_ident(column).map_err(|message| source_error(name, message))?;
+    }
+    crate::sql::validate_column_ident(from_table).map_err(|message| source_error(name, message))?;
+    crate::sql::validate_column_ident(to_table).map_err(|message| source_error(name, message))?;
+    if from_columns.len() != to_columns.len() {
+        return Err(source_error(
+            name,
+            "from and to column counts must match".to_string(),
+        ));
+    }
+    let source_sql = non_null_count(dialect, from_table, from_columns)?;
+    let target_sql = non_null_count(dialect, to_table, to_columns)?;
+    let matched =
+        crate::sql::build::overlap_counts(dialect, from_table, from_columns, to_table, to_columns)?;
+    let source_sql = GuardedSql::from(source_sql);
+    let target_sql = GuardedSql::from(target_sql);
+    let matched = GuardedSql::from(matched);
+    Ok(crate::source::OverlapCounts {
+        source_non_null_rows: session.count_sql(&source_sql)?,
+        target_non_null_rows: session.count_sql(&target_sql)?,
+        matched_rows: session.count_sql(&matched)?,
+    })
+}
+
+fn non_null_count(
+    dialect: SqlDialect,
+    table: &str,
+    columns: &[String],
+) -> Result<GuardedSelect, DipperError> {
+    let filters = columns
+        .iter()
+        .map(|column| crate::config::Filter {
+            column: column.clone(),
+            op: crate::config::FilterOp::NotNull,
+            value: None,
+        })
+        .collect();
+    let spec = SelectSpec {
+        table: table.to_string(),
+        columns: vec![columns[0].clone()],
+        filters,
+        limit: None,
+        batch_rows: 1,
+        key: None,
+        paging: Paging::Snapshot,
+    };
+    Ok(crate::sql::build::count(dialect, &spec)?.0)
+}
+
+impl SqliteSource {
+    fn sqlite_foreign_keys(&self, table: &str) -> Result<Vec<CatalogForeignKey>, DipperError> {
+        let rows = self.session.read_foreign_keys(table)?;
+        let mut groups: std::collections::BTreeMap<i64, Vec<(i64, String, String, String)>> =
+            std::collections::BTreeMap::new();
+        for row in &rows {
+            let id = cell_i64(row, 0)
+                .map_err(|message| source_error(self.name(), message))?
+                .unwrap_or(0);
+            let seq = cell_i64(row, 1)
+                .map_err(|message| source_error(self.name(), message))?
+                .unwrap_or(0);
+            let target_table = cell_text(row, 2).unwrap_or_default();
+            let from = cell_text(row, 3).unwrap_or_default();
+            let to = cell_text(row, 4).unwrap_or_default();
+            if target_table.is_empty() || from.is_empty() || to.is_empty() {
+                continue;
+            }
+            groups
+                .entry(id)
+                .or_default()
+                .push((seq, from, target_table, to));
+        }
+        let mut foreign_keys = Vec::new();
+        for (id, mut parts) in groups {
+            parts.sort_by_key(|(seq, _, _, _)| *seq);
+            let target_table = parts[0].2.clone();
+            foreign_keys.push(CatalogForeignKey {
+                name: Some(format!("fk_{id}")),
+                columns: parts.iter().map(|(_, from, _, _)| from.clone()).collect(),
+                target_owner: "main".to_string(),
+                target_table,
+                target_columns: parts.into_iter().map(|(_, _, _, to)| to).collect(),
+            });
+        }
+        Ok(foreign_keys)
     }
 }
 
@@ -625,6 +773,23 @@ mod tests {
             .columns
             .iter()
             .any(|column| column.name == "ORDER_ID"));
+    }
+
+    #[test]
+    fn check_relation_rejects_non_main_schema() {
+        let _lock = crate::source::session::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = sample(dir.path());
+        let src = connect("t", &path);
+        let columns = vec!["ORDER_ID".to_string()];
+        let err = src
+            .check_relation("other", "ORDERS", &columns, "main", "ORDERS", &columns)
+            .unwrap_err();
+        assert!(err.to_string().contains("only main"), "{err}");
+        let err = src
+            .check_relation("main", "ORDERS", &columns, "TEMP", "ORDERS", &columns)
+            .unwrap_err();
+        assert!(err.to_string().contains("only main"), "{err}");
     }
 
     #[test]

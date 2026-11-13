@@ -74,8 +74,47 @@ pub fn merge(extracted: &OntologyDoc, overlay: &OverlayDoc) -> Result<OntologyDo
             column.unit_status = status;
         }
     }
+    doc.relations = normalize_relations(&doc, &overlay.relations)?;
     doc.check()?;
     Ok(doc)
+}
+
+fn normalize_relations(
+    doc: &OntologyDoc,
+    relations: &[crate::ontology::schema::Relation],
+) -> Result<Vec<crate::ontology::schema::Relation>, String> {
+    use crate::ontology::schema::Relation;
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    for relation in relations {
+        let columns = relation
+            .columns
+            .iter()
+            .map(|name| {
+                doc.columns
+                    .iter()
+                    .find(|column| column.name.eq_ignore_ascii_case(name))
+                    .map(|column| column.name.clone())
+                    .ok_or_else(|| format!("relation column {name} is not in the extracted table"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let key = format!(
+            "{}|{}|{}|{}",
+            columns.join(",").to_ascii_lowercase(),
+            relation.target_owner.to_ascii_lowercase(),
+            relation.target_table.to_ascii_lowercase(),
+            relation.target_columns.join(",").to_ascii_lowercase()
+        );
+        if seen.iter().any(|existing| existing == &key) {
+            return Err("duplicate relation".to_string());
+        }
+        seen.push(key);
+        out.push(Relation {
+            columns,
+            ..relation.clone()
+        });
+    }
+    Ok(out)
 }
 
 fn same_structure(column: &OntologyColumn, extra: &OverlayColumn) -> Result<(), String> {
@@ -161,6 +200,8 @@ mod tests {
             table_comment: None,
             primary_key: vec!["QTY".to_string()],
             time_column: None,
+            foreign_keys: Vec::new(),
+            relations: Vec::new(),
             columns: vec![OntologyColumn {
                 name: "QTY".to_string(),
                 data_type: "INTEGER".to_string(),
@@ -186,6 +227,7 @@ mod tests {
             table_comment: None,
             primary_key: None,
             time_column: None,
+            relations: Vec::new(),
             columns: vec![OverlayColumn {
                 name: "qty".to_string(),
                 data_type: None,

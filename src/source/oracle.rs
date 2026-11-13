@@ -10,11 +10,11 @@ use crate::source::preflight::{blocks, DictQuery, Dictionary};
 use crate::source::session::{Executor, RowCursor, Session, SessionOptions, SessionStatement};
 use crate::source::watchdog::{Breaker, SystemClock};
 use crate::source::{
-    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogTable, ChunkIter, OpenOptions,
-    Opened, Paging, PreflightReport, SelectSpec, Source, Value,
+    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogForeignKey, CatalogTable,
+    ChunkIter, OpenOptions, Opened, Paging, PreflightReport, SelectSpec, Source, Value,
 };
 use crate::sql::build;
-use crate::sql::guard::{GuardedSelect, SqlDialect};
+use crate::sql::guard::{GuardedSelect, GuardedSql, SqlDialect};
 
 pub(crate) struct OracleSource {
     session: Session<LoggingExecutor<OracleExec>>,
@@ -150,10 +150,38 @@ impl Executor for OracleExec {
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
+        self.open_statement(query.sql(), binds, fetch_rows)
+    }
+
+    fn open_sql<'a>(
+        &'a self,
+        query: &GuardedSql,
+        binds: &[Value],
+        fetch_rows: usize,
+    ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
+        self.open_statement(query.sql(), binds, fetch_rows)
+    }
+
+    fn breaker(&self) -> Arc<dyn Breaker> {
+        Arc::clone(&self.breaker) as Arc<dyn Breaker>
+    }
+
+    fn close(&self) -> Result<(), DipperError> {
+        self.conn.rollback().map_err(|err| self.fail(err))
+    }
+}
+
+impl OracleExec {
+    fn open_statement<'a>(
+        &'a self,
+        sql: &str,
+        binds: &[Value],
+        fetch_rows: usize,
+    ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
         let size = u32::try_from(fetch_rows.max(1)).unwrap_or(u32::MAX);
         let statement = self
             .conn
-            .statement(query.sql())
+            .statement(sql)
             .fetch_array_size(size)
             .prefetch_rows(size)
             .build()
@@ -189,14 +217,6 @@ impl Executor for OracleExec {
             types,
             name: self.name.clone(),
         }))
-    }
-
-    fn breaker(&self) -> Arc<dyn Breaker> {
-        Arc::clone(&self.breaker) as Arc<dyn Breaker>
-    }
-
-    fn close(&self) -> Result<(), DipperError> {
-        self.conn.rollback().map_err(|err| self.fail(err))
     }
 }
 
@@ -492,7 +512,11 @@ impl Source for OracleSource {
             .and_then(|row| cell_text(row, 0));
         let constraints = self.session.rows(
             DictQuery::AllConstraints,
-            &[owner_bind, table_bind, Value::Text("ENABLED".to_string())],
+            &[
+                owner_bind.clone(),
+                table_bind.clone(),
+                Value::Text("ENABLED".to_string()),
+            ],
         )?;
         let pk_names: Vec<String> = constraints
             .iter()
@@ -519,13 +543,231 @@ impl Source for OracleSource {
             keyed.push((position, name));
         }
         keyed.sort_by_key(|(position, _)| *position);
+        let primary_key = keyed.into_iter().map(|(_, name)| name).collect();
+        let foreign_keys = oracle_foreign_keys(self, &owner_bind, &table_bind, &positions)?;
         Ok(CatalogTable {
             object_type: object_type.to_string(),
             table_comment,
-            primary_key: keyed.into_iter().map(|(_, name)| name).collect(),
+            primary_key,
             columns,
+            foreign_keys,
         })
     }
+
+    fn check_relation(
+        &self,
+        from_owner: &str,
+        from_table: &str,
+        from_columns: &[String],
+        to_owner: &str,
+        to_table: &str,
+        to_columns: &[String],
+    ) -> Result<crate::source::OverlapCounts, DipperError> {
+        for name in [from_owner, from_table, to_owner, to_table] {
+            crate::sql::validate_ident(name)
+                .map_err(|message| message_error(self.name(), message))?;
+        }
+        for column in from_columns.iter().chain(to_columns) {
+            crate::sql::validate_column_ident(column)
+                .map_err(|message| message_error(self.name(), message))?;
+        }
+        if from_columns.len() != to_columns.len() {
+            return Err(message_error(
+                self.name(),
+                "from and to column counts must match",
+            ));
+        }
+        let from = format!("{from_owner}.{from_table}");
+        let to = format!("{to_owner}.{to_table}");
+        let source_sql = non_null_count(SqlDialect::Oracle, &from, from_columns)?;
+        let target_sql = non_null_count(SqlDialect::Oracle, &to, to_columns)?;
+        let matched = crate::sql::build::overlap_counts(
+            SqlDialect::Oracle,
+            &from,
+            from_columns,
+            &to,
+            to_columns,
+        )?;
+        let source_sql = GuardedSql::from(source_sql);
+        let target_sql = GuardedSql::from(target_sql);
+        let matched = GuardedSql::from(matched);
+        Ok(crate::source::OverlapCounts {
+            source_non_null_rows: self.session.count_sql(&source_sql)?,
+            target_non_null_rows: self.session.count_sql(&target_sql)?,
+            matched_rows: self.session.count_sql(&matched)?,
+        })
+    }
+}
+
+fn non_null_count(
+    dialect: SqlDialect,
+    table: &str,
+    columns: &[String],
+) -> Result<GuardedSelect, DipperError> {
+    let filters = columns
+        .iter()
+        .map(|column| crate::config::Filter {
+            column: column.clone(),
+            op: crate::config::FilterOp::NotNull,
+            value: None,
+        })
+        .collect();
+    let spec = crate::source::SelectSpec {
+        table: table.to_string(),
+        columns: vec![columns.first().cloned().unwrap_or_default()],
+        filters,
+        limit: None,
+        batch_rows: 1,
+        key: None,
+        paging: crate::source::Paging::Snapshot,
+    };
+    Ok(crate::sql::build::count(dialect, &spec)?.0)
+}
+
+type PositionedColumns = Vec<(i64, String)>;
+type ResolvedTarget = Option<(String, Vec<String>)>;
+
+struct DeclaredOracleFk {
+    name: String,
+    target_owner: String,
+    target_constraint: String,
+    child_columns: PositionedColumns,
+}
+
+fn oracle_foreign_keys(
+    source: &OracleSource,
+    owner: &Value,
+    table: &Value,
+    positions: &[Vec<Value>],
+) -> Result<Vec<CatalogForeignKey>, DipperError> {
+    let keys = source.session.rows(
+        DictQuery::AllForeignKeys,
+        &[
+            owner.clone(),
+            table.clone(),
+            Value::Text("R".to_string()),
+            Value::Text("ENABLED".to_string()),
+        ],
+    )?;
+    let mut declared = Vec::new();
+    for row in &keys {
+        let Some(name) = cell_text(row, 0) else {
+            continue;
+        };
+        let Some(target_owner) = cell_text(row, 1) else {
+            continue;
+        };
+        let Some(target_constraint) = cell_text(row, 2) else {
+            continue;
+        };
+        declared.push(DeclaredOracleFk {
+            child_columns: constraint_positions(positions, &name),
+            name,
+            target_owner,
+            target_constraint,
+        });
+    }
+    assemble_oracle_foreign_keys(declared, |target_owner, target_constraint| {
+        oracle_target(source, target_owner, target_constraint).map_err(|err| err.to_string())
+    })
+    .map_err(|message| message_error(source.name(), message))
+}
+
+fn constraint_positions(positions: &[Vec<Value>], constraint: &str) -> PositionedColumns {
+    let mut keyed = Vec::new();
+    for row in positions {
+        if cell_text(row, 0).as_deref() != Some(constraint) {
+            continue;
+        }
+        let Some(name) = cell_text(row, 1) else {
+            continue;
+        };
+        let position = cell_i64(row, 2).ok().flatten().unwrap_or(i64::MAX);
+        keyed.push((position, name));
+    }
+    keyed
+}
+
+fn oracle_target(
+    source: &OracleSource,
+    owner: &str,
+    constraint: &str,
+) -> Result<Option<(String, PositionedColumns)>, DipperError> {
+    let binds = [
+        Value::Text(owner.to_string()),
+        Value::Text(constraint.to_string()),
+    ];
+    let tables = source
+        .session
+        .rows(DictQuery::AllConstraintTarget, &binds)?;
+    let Some(target_table) = tables.first().and_then(|row| cell_text(row, 0)) else {
+        return Ok(None);
+    };
+    let columns = source
+        .session
+        .rows(DictQuery::AllConstraintColumns, &binds)?;
+    if columns.is_empty() {
+        return Ok(None);
+    }
+    let mut keyed = Vec::new();
+    for row in &columns {
+        let Some(name) = cell_text(row, 0) else {
+            continue;
+        };
+        let position = cell_i64(row, 1).ok().flatten().unwrap_or(i64::MAX);
+        keyed.push((position, name));
+    }
+    if keyed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((target_table, keyed)))
+}
+
+/// Order declared foreign keys by `POSITION` and drop targets the dictionary cannot see.
+fn assemble_oracle_foreign_keys(
+    declared: Vec<DeclaredOracleFk>,
+    mut lookup: impl FnMut(&str, &str) -> Result<Option<(String, PositionedColumns)>, String>,
+) -> Result<Vec<CatalogForeignKey>, String> {
+    let mut cache: std::collections::BTreeMap<(String, String), ResolvedTarget> =
+        std::collections::BTreeMap::new();
+    let mut foreign_keys = Vec::new();
+    for key in declared {
+        let cached = match cache.get(&(key.target_owner.clone(), key.target_constraint.clone())) {
+            Some(found) => found.clone(),
+            None => {
+                let found = lookup(&key.target_owner, &key.target_constraint)?
+                    .map(|(table, columns)| (table, names_by_position(columns)));
+                cache.insert(
+                    (key.target_owner.clone(), key.target_constraint.clone()),
+                    found.clone(),
+                );
+                found
+            }
+        };
+        let Some((target_table, target_columns)) = cached else {
+            continue;
+        };
+        let columns = names_by_position(key.child_columns);
+        if columns.is_empty() || columns.len() != target_columns.len() {
+            return Err(format!(
+                "foreign key {} column counts do not match",
+                key.name
+            ));
+        }
+        foreign_keys.push(CatalogForeignKey {
+            name: Some(key.name),
+            columns,
+            target_owner: key.target_owner,
+            target_table,
+            target_columns,
+        });
+    }
+    Ok(foreign_keys)
+}
+
+fn names_by_position(mut columns: PositionedColumns) -> Vec<String> {
+    columns.sort_by_key(|(position, _)| *position);
+    columns.into_iter().map(|(_, name)| name).collect()
 }
 
 /// Turn one `COUNT(*)` cell into a row count.
@@ -641,5 +883,79 @@ mod tests {
             };
             assert_eq!(stamp.hour(), hour);
         }
+    }
+
+    #[test]
+    fn oracle_foreign_keys_follow_position_order() {
+        let declared = vec![DeclaredOracleFk {
+            name: "FK_ORDER".to_string(),
+            target_owner: "SALES".to_string(),
+            target_constraint: "PK_PART".to_string(),
+            child_columns: vec![(2, "PART".to_string()), (1, "CROSS_ID".to_string())],
+        }];
+        let keys = assemble_oracle_foreign_keys(declared, |_owner, _constraint| {
+            Ok(Some((
+                "PARTS".to_string(),
+                vec![(2, "PART".to_string()), (1, "CROSS_ID".to_string())],
+            )))
+        })
+        .unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].columns, ["CROSS_ID", "PART"]);
+        assert_eq!(keys[0].target_columns, ["CROSS_ID", "PART"]);
+        assert_eq!(keys[0].target_owner, "SALES");
+        assert_eq!(keys[0].target_table, "PARTS");
+    }
+
+    #[test]
+    fn oracle_foreign_keys_skip_invisible_targets() {
+        let declared = vec![
+            DeclaredOracleFk {
+                name: "FK_HIDDEN".to_string(),
+                target_owner: "OTHER".to_string(),
+                target_constraint: "PK_HIDDEN".to_string(),
+                child_columns: vec![(1, "HIDDEN_ID".to_string())],
+            },
+            DeclaredOracleFk {
+                name: "FK_VISIBLE".to_string(),
+                target_owner: "SALES".to_string(),
+                target_constraint: "PK_PART".to_string(),
+                child_columns: vec![(1, "CROSS_ID".to_string())],
+            },
+        ];
+        let keys = assemble_oracle_foreign_keys(declared, |owner, _constraint| {
+            if owner == "OTHER" {
+                Ok(None)
+            } else {
+                Ok(Some((
+                    "PARTS".to_string(),
+                    vec![(1, "CROSS_ID".to_string())],
+                )))
+            }
+        })
+        .unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name.as_deref(), Some("FK_VISIBLE"));
+        assert!(!keys[0].columns.is_empty());
+        assert!(!keys[0].target_columns.is_empty());
+    }
+
+    #[test]
+    fn oracle_foreign_keys_reject_mismatched_column_counts() {
+        let declared = vec![DeclaredOracleFk {
+            name: "FK_BAD".to_string(),
+            target_owner: "SALES".to_string(),
+            target_constraint: "PK_PART".to_string(),
+            child_columns: vec![(1, "CROSS_ID".to_string()), (2, "PART".to_string())],
+        }];
+        let err = assemble_oracle_foreign_keys(declared, |_owner, _constraint| {
+            Ok(Some((
+                "PARTS".to_string(),
+                vec![(1, "CROSS_ID".to_string())],
+            )))
+        })
+        .unwrap_err();
+        assert!(err.contains("FK_BAD"), "{err}");
+        assert!(err.contains("column counts"), "{err}");
     }
 }

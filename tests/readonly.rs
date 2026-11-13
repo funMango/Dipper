@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use dipper::config::SourceConfig;
 use dipper::source::{open, OpenOptions, Paging, SelectSpec, SessionStatement, SqlLogSink, Value};
-use dipper::sql::guard::{GuardedSelect, SqlDialect};
+use dipper::sql::guard::{GuardedOverlapSelect, GuardedSelect, SqlDialect};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -288,4 +288,86 @@ fn a_second_source_is_busy_until_the_first_closes() {
     drop(first);
     let second = open("other", &cfg, &opts).unwrap();
     drop(second);
+}
+
+#[test]
+fn check_relation_counts_run_inside_rollback_and_through_the_guard() {
+    let _lock = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE ORDERS (CROSS_ID TEXT);
+         CREATE TABLE INTERSECTIONS (CROSS_ID TEXT);
+         INSERT INTO ORDERS (CROSS_ID) VALUES ('A');
+         INSERT INTO INTERSECTIONS (CROSS_ID) VALUES ('A');",
+    )
+    .unwrap();
+    drop(conn);
+    let cfg = SourceConfig::Sqlite {
+        path,
+        max_session_minutes: 480,
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let opened = open(
+        "sample",
+        &cfg,
+        &OpenOptions {
+            strict: false,
+            log: SqlLogSink::Memory(Arc::clone(&log)),
+            action: "check".to_string(),
+        },
+    )
+    .unwrap();
+    let counts = opened
+        .source
+        .check_relation(
+            "main",
+            "ORDERS",
+            &["CROSS_ID".to_string()],
+            "main",
+            "INTERSECTIONS",
+            &["CROSS_ID".to_string()],
+        )
+        .unwrap();
+    assert_eq!(counts.source_non_null_rows, 1);
+    assert_eq!(counts.target_non_null_rows, 1);
+    assert_eq!(counts.matched_rows, 1);
+    drop(opened);
+    let recorded = log.lock().unwrap().clone();
+    let counts_sql: Vec<&String> = recorded
+        .iter()
+        .filter(|sql| sql.starts_with("SELECT COUNT(*)"))
+        .collect();
+    assert_eq!(counts_sql.len(), 3, "{recorded:?}");
+    let mut overlap = 0;
+    for sql in &counts_sql {
+        let select_ok = GuardedSelect::parse(sql, SqlDialect::Sqlite).is_ok();
+        let overlap_ok = GuardedOverlapSelect::parse(sql, SqlDialect::Sqlite).is_ok();
+        assert!(
+            select_ok || overlap_ok,
+            "count SQL did not pass a guard: {sql}"
+        );
+        if sql.contains("EXISTS") {
+            assert!(!select_ok, "EXISTS reached GuardedSelect: {sql}");
+            assert!(overlap_ok, "{sql}");
+            overlap += 1;
+        }
+    }
+    assert_eq!(overlap, 1, "{recorded:?}");
+    let mut wrapped = 0;
+    let mut index = 0;
+    while index < recorded.len() {
+        if recorded[index] == "BEGIN"
+            && index + 2 < recorded.len()
+            && recorded[index + 1].starts_with("SELECT COUNT(*)")
+            && recorded[index + 2] == "ROLLBACK"
+        {
+            wrapped += 1;
+            index += 3;
+            continue;
+        }
+        index += 1;
+    }
+    assert_eq!(wrapped, 3, "{recorded:?}");
 }

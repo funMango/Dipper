@@ -244,6 +244,500 @@ fn validate_rejects_a_bad_overlay() {
 }
 
 #[test]
+fn overlay_rejects_draft_relation_without_evidence_or_unknown_column_or_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    events_db(dir.path());
+    let config = config(dir.path());
+    pull(dir.path(), &config, &[]).code(0);
+    let overlay_dir = dir.path().join("ontology/overlay/sample");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    let overlay = overlay_dir.join("main.EVENTS.json");
+    let bodies = [
+        r#"{"version":1,"relations":[{"columns":["QTY"],"target_owner":"main","target_table":"OTHER","target_columns":["QTY"],"status":"draft","evidence":"   "}]}"#,
+        r#"{"version":1,"relations":[{"columns":["MISSING"],"target_owner":"main","target_table":"OTHER","target_columns":["QTY"],"status":"draft","evidence":"same name"}]}"#,
+        r#"{"version":1,"relations":[{"columns":["QTY"],"target_owner":"main","target_table":"OTHER","target_columns":["QTY"],"status":"draft","evidence":"same name"},{"columns":["qty"],"target_owner":"MAIN","target_table":"other","target_columns":["qty"],"status":"confirmed"}]}"#,
+    ];
+    for body in bodies {
+        std::fs::write(&overlay, body).unwrap();
+        common::dipper()
+            .current_dir(dir.path())
+            .args(["ontology", "validate"])
+            .assert()
+            .code(1);
+    }
+}
+
+#[test]
+fn overlay_cannot_override_extracted_foreign_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    events_db(dir.path());
+    let config = config(dir.path());
+    pull(dir.path(), &config, &[]).code(0);
+    let overlay_dir = dir.path().join("ontology/overlay/sample");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("main.EVENTS.json"),
+        r#"{"version":1,"foreign_keys":[{"name":"fk_0","columns":["QTY"],"target_owner":"main","target_table":"OTHER","target_columns":["QTY"]}]}"#,
+    )
+    .unwrap();
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["ontology", "validate"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("foreign_keys"), "{stderr}");
+}
+
+fn related_db(dir: &Path) {
+    let conn = rusqlite::Connection::open(dir.join("source.db")).unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+        CREATE TABLE INTERSECTIONS (
+            CROSS_ID TEXT PRIMARY KEY
+        );
+        CREATE TABLE PARTS (
+            CROSS_ID TEXT NOT NULL,
+            PART TEXT NOT NULL,
+            PRIMARY KEY (CROSS_ID, PART)
+        );
+        CREATE TABLE ORDERS (
+            ID INTEGER PRIMARY KEY,
+            CROSS_ID TEXT,
+            PART TEXT,
+            JYWK_CNT INTEGER,
+            VS TEXT,
+            XC TEXT,
+            FOREIGN KEY (CROSS_ID) REFERENCES INTERSECTIONS (CROSS_ID),
+            FOREIGN KEY (CROSS_ID, PART) REFERENCES PARTS (CROSS_ID, PART)
+        );
+        INSERT INTO INTERSECTIONS (CROSS_ID) VALUES ('KEYCANARY-9a2f');
+        INSERT INTO INTERSECTIONS (CROSS_ID) VALUES ('MISS');
+        INSERT INTO PARTS (CROSS_ID, PART) VALUES ('KEYCANARY-9a2f', 'A');
+        INSERT INTO PARTS (CROSS_ID, PART) VALUES ('OTHER', 'Z');
+        INSERT INTO ORDERS (ID, CROSS_ID, PART) VALUES (1, 'KEYCANARY-9a2f', 'A');
+        INSERT INTO ORDERS (ID, CROSS_ID, PART) VALUES (2, 'KEYCANARY-9a2f', 'A');
+        INSERT INTO ORDERS (ID, CROSS_ID, PART) VALUES (3, 'OTHER', 'Z');
+        INSERT INTO ORDERS (ID, CROSS_ID, PART) VALUES (4, NULL, NULL);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn sqlite_extract_includes_declared_foreign_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    related_db(dir.path());
+    let config = config(dir.path());
+    common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["ontology", "pull", "sample", "--table", "ORDERS"])
+        .assert()
+        .code(0);
+    let text = std::fs::read_to_string(
+        dir.path()
+            .join("ontology/extracted/sample/main.ORDERS.json"),
+    )
+    .unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(doc.get("relations").is_none(), "{doc}");
+    let keys = doc["foreign_keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    assert_eq!(keys[0]["name"], "fk_0");
+    assert_eq!(keys[0]["columns"], serde_json::json!(["CROSS_ID", "PART"]));
+    assert_eq!(keys[0]["target_owner"], "main");
+    assert_eq!(keys[0]["target_table"], "PARTS");
+    assert_eq!(
+        keys[0]["target_columns"],
+        serde_json::json!(["CROSS_ID", "PART"])
+    );
+    assert_eq!(keys[1]["name"], "fk_1");
+    assert_eq!(keys[1]["columns"], serde_json::json!(["CROSS_ID"]));
+    assert_eq!(keys[1]["target_owner"], "main");
+    assert_eq!(keys[1]["target_table"], "INTERSECTIONS");
+    assert_eq!(keys[1]["target_columns"], serde_json::json!(["CROSS_ID"]));
+    for column in doc["columns"].as_array().unwrap() {
+        assert!(column["meaning"].is_null(), "{column}");
+        assert!(column["unit"].is_null(), "{column}");
+        assert_eq!(column["meaning_status"], "unknown");
+        assert_eq!(column["unit_status"], "unknown");
+    }
+    let names: Vec<&str> = doc["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| column["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"JYWK_CNT"), "{names:?}");
+    assert!(names.contains(&"VS"), "{names:?}");
+    assert!(names.contains(&"XC"), "{names:?}");
+}
+
+#[test]
+fn render_outputs_obsidian_wikilinks_and_index() {
+    let dir = tempfile::tempdir().unwrap();
+    related_db(dir.path());
+    let config = config(dir.path());
+    for table in ["ORDERS", "INTERSECTIONS"] {
+        common::dipper()
+            .current_dir(dir.path())
+            .args(["--config"])
+            .arg(&config)
+            .args(["ontology", "pull", "sample", "--table", table])
+            .assert()
+            .code(0);
+    }
+    let overlay_dir = dir.path().join("ontology/overlay/sample");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("main.ORDERS.json"),
+        r#"{
+  "version": 1,
+  "relations": [
+    {
+      "columns": ["CROSS_ID"],
+      "target_owner": "main",
+      "target_table": "INTERSECTIONS",
+      "target_columns": ["CROSS_ID"],
+      "status": "draft",
+      "evidence": "same column name",
+      "overlap": {
+        "source_non_null_rows": 1200,
+        "target_non_null_rows": 80,
+        "matched_rows": 1195,
+        "match_ratio": 0.9958333333333333
+      }
+    },
+    {
+      "columns": ["PART"],
+      "target_owner": "main",
+      "target_table": "INTERSECTIONS",
+      "target_columns": ["PART"],
+      "status": "confirmed",
+      "evidence": "confirmed by the user"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["ontology", "render"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("_index.md"), "{stdout}");
+    let md = std::fs::read_to_string(dir.path().join("ontology/md/sample/main.ORDERS.md")).unwrap();
+    assert!(md.contains("| ID | INTEGER |"), "{md}");
+    assert!(
+        md.contains("- `CROSS_ID, PART` -> [[main.PARTS]] (`CROSS_ID, PART`) (fk_0)"),
+        "{md}"
+    );
+    assert!(
+        md.contains("- `CROSS_ID` -> [[main.INTERSECTIONS]] (`CROSS_ID`) (fk_1)"),
+        "{md}"
+    );
+    assert!(
+        md.contains("- [draft] `CROSS_ID` -> [[main.INTERSECTIONS]] (`CROSS_ID`) — same column name (overlap: 1195/1200, 99.6%)"),
+        "{md}"
+    );
+    assert!(
+        md.contains(
+            "- [confirmed] `PART` -> [[main.INTERSECTIONS]] (`PART`) — confirmed by the user"
+        ),
+        "{md}"
+    );
+    let confirmed = md
+        .lines()
+        .find(|line| line.contains("[confirmed]"))
+        .unwrap();
+    assert!(!confirmed.contains("overlap"), "{confirmed}");
+    let index = std::fs::read_to_string(dir.path().join("ontology/md/sample/_index.md")).unwrap();
+    assert!(index.contains("[[main.INTERSECTIONS]]"), "{index}");
+    assert!(index.contains("[[main.ORDERS]]"), "{index}");
+    let inter = index.find("[[main.INTERSECTIONS]]").unwrap();
+    let orders = index.find("[[main.ORDERS]]").unwrap();
+    assert!(inter < orders, "{index}");
+}
+
+#[test]
+fn check_relation_json_returns_counts_without_row_values_or_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    related_db(dir.path());
+    let config = config(dir.path());
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--log-sql", "--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "check-relation",
+            "sample",
+            "--from-table",
+            "ORDERS",
+            "--from-column",
+            "CROSS_ID",
+            "--to-table",
+            "INTERSECTIONS",
+            "--to-column",
+            "CROSS_ID",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stdout.contains("KEYCANARY-9a2f"), "{stdout}");
+    assert!(!stderr.contains("KEYCANARY-9a2f"), "{stderr}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["command"], "ontology.check_relation");
+    assert_eq!(doc["ok"], true);
+    assert_eq!(doc["exit_code"], 0);
+    assert_eq!(doc["source"], "sample");
+    assert_eq!(doc["from"]["owner"], "main");
+    assert_eq!(doc["from"]["table"], "ORDERS");
+    assert_eq!(doc["from"]["columns"], serde_json::json!(["CROSS_ID"]));
+    assert_eq!(doc["to"]["table"], "INTERSECTIONS");
+    assert_eq!(doc["source_non_null_rows"], 3);
+    assert_eq!(doc["target_non_null_rows"], 2);
+    assert_eq!(doc["matched_rows"], 2);
+    let ratio = doc["match_ratio"].as_f64().unwrap();
+    assert!((ratio - (2.0 / 3.0)).abs() < 1e-12, "{ratio}");
+    assert!(doc["error"].is_null());
+    let sql_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("sql: "))
+        .collect();
+    assert!(
+        sql_lines
+            .iter()
+            .any(|line| line.contains("COUNT(*)") && line.contains("EXISTS")),
+        "{sql_lines:?}"
+    );
+    assert!(
+        sql_lines.iter().all(|line| {
+            let sql = line.trim_start_matches("sql: ");
+            sql == "BEGIN"
+                || sql == "ROLLBACK"
+                || sql.starts_with("SELECT COUNT(*)")
+                || sql.starts_with("PRAGMA query_only")
+        }),
+        "{sql_lines:?}"
+    );
+
+    let empty = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "check-relation",
+            "sample",
+            "--from-table",
+            "ORDERS",
+            "--from-column",
+            "VS",
+            "--to-table",
+            "INTERSECTIONS",
+            "--to-column",
+            "CROSS_ID",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let empty_doc: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty_doc["source_non_null_rows"], 0);
+    assert_eq!(empty_doc["match_ratio"], 0.0);
+}
+
+#[test]
+fn check_relation_rejects_mismatched_column_arity_or_missing_column() {
+    let dir = tempfile::tempdir().unwrap();
+    related_db(dir.path());
+    let config = config(dir.path());
+    let mismatch = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "check-relation",
+            "sample",
+            "--from-table",
+            "ORDERS",
+            "--from-column",
+            "CROSS_ID",
+            "--from-column",
+            "PART",
+            "--to-table",
+            "INTERSECTIONS",
+            "--to-column",
+            "CROSS_ID",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let mismatch_doc: serde_json::Value = serde_json::from_slice(&mismatch.stdout).unwrap();
+    assert_eq!(mismatch_doc["ok"], false);
+    assert_eq!(mismatch_doc["exit_code"], 1);
+    assert!(mismatch_doc["error"]["message"].is_string());
+
+    let missing = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "check-relation",
+            "sample",
+            "--from-table",
+            "ORDERS",
+            "--from-column",
+            "NO_SUCH_COLUMN",
+            "--to-table",
+            "INTERSECTIONS",
+            "--to-column",
+            "CROSS_ID",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(missing.stdout).unwrap();
+    let stderr = String::from_utf8(missing.stderr).unwrap();
+    assert!(!stdout.contains("KEYCANARY-9a2f"), "{stdout}");
+    assert!(!stderr.contains("KEYCANARY-9a2f"), "{stderr}");
+    let missing_doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(missing_doc["ok"], false);
+    assert_eq!(missing_doc["command"], "ontology.check_relation");
+}
+
+#[test]
+fn check_relation_hides_oracle_credentials_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1521/NOPE"
+user = "reader"
+password = "${DIPPER_PR3B_PASSWORD}"
+"#,
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .env("DIPPER_PR3B_PASSWORD", "PR2-canary-7f1d9c")
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "check-relation",
+            "company",
+            "--from-table",
+            "SALES.ORDERS",
+            "--from-column",
+            "ORDER_ID",
+            "--to-table",
+            "SALES.CUSTOMERS",
+            "--to-column",
+            "CUSTOMER_ID",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["command"], "ontology.check_relation");
+    for text in [&stdout, &stderr] {
+        assert!(!text.contains("PR2-canary-7f1d9c"), "{text}");
+        assert!(!text.contains("reader"), "{text}");
+        assert!(!text.contains("127.0.0.1:1521/NOPE"), "{text}");
+    }
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+fn check_relation_redacts_short_oracle_password_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1521/NOPE"
+user = "reader"
+password = "${DIPPER_PR3B_PASSWORD}"
+"#,
+    );
+    for format in [Some("json"), None] {
+        let mut command = common::dipper();
+        command
+            .current_dir(dir.path())
+            .env("DIPPER_PR3B_PASSWORD", "1047")
+            .args(["--config"])
+            .arg(&config)
+            .args([
+                "ontology",
+                "check-relation",
+                "company",
+                "--from-table",
+                "SALES.ORDERS",
+                "--from-column",
+                "ORDER_ID",
+                "--to-table",
+                "SALES.CUSTOMERS",
+                "--to-column",
+                "CUSTOMER_ID",
+            ]);
+        if let Some(format) = format {
+            command.args(["--format", format]);
+        }
+        let output = command.assert().code(1).get_output().clone();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let combined = format!("{stdout}{stderr}");
+        assert!(!combined.contains("1047"), "{combined}");
+        assert!(!combined.contains("reader"), "{combined}");
+        assert!(!combined.contains("127.0.0.1:1521/NOPE"), "{combined}");
+        assert!(
+            combined.contains("details withheld")
+                || combined.contains("driver message hidden because it contained the password"),
+            "{combined}"
+        );
+        if format == Some("json") {
+            let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(doc["ok"], false);
+            assert_eq!(doc["command"], "ontology.check_relation");
+            let message = doc["error"]["message"].as_str().unwrap();
+            assert!(!message.contains("1047"), "{message}");
+        }
+    }
+}
+
+#[test]
 fn dictionary_sql_is_logged_only_with_log_sql() {
     let dir = tempfile::tempdir().unwrap();
     events_db(dir.path());

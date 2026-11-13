@@ -6,5 +6,6 @@ mod render;
 mod schema;
 
 pub use extract::pull;
+pub(crate) use extract::split_table;
 pub use render::render;
 pub use schema::validate;

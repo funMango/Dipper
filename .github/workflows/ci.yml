@@ -60,6 +60,35 @@ jobs:
           if grep -rnE '\bduckdb::|^use duckdb\b' src/ | grep -vE '^src/store/'; then
             echo "duckdb used outside src/store/"; exit 1
           fi
+      - name: Skill and adapter files
+        shell: bash
+        run: |
+          test -f skills/dipper/SKILL.md
+          test -f .claude/skills/dipper/SKILL.md
+          test -f .cursor/rules/dipper.mdc
+          test -f AGENTS.md
+          grep -q '^name: dipper$' .claude/skills/dipper/SKILL.md
+          grep -q '^description: Pull and enrich Dipper table ontologies' .claude/skills/dipper/SKILL.md
+          grep -q 'skills/dipper/SKILL.md' .claude/skills/dipper/SKILL.md
+          grep -q '^description: Dipper CLI workflow' .cursor/rules/dipper.mdc
+          grep -q '^alwaysApply: false$' .cursor/rules/dipper.mdc
+          grep -q 'skills/dipper/SKILL.md' .cursor/rules/dipper.mdc
+          grep -q 'skills/dipper/SKILL.md' AGENTS.md
+          for phrase in "ontology pull" "check-relation" "ontology validate" "ontology render" "DIPPER_ORA_USER" "DIPPER_ORA_PASSWORD" "DIPPER_AI_" "GuardedSelect"; do
+            grep -q "$phrase" skills/dipper/SKILL.md || { echo "missing skill phrase: $phrase"; exit 1; }
+          done
+          if grep -RInE 'DIPPER_AI_' src .claude .cursor AGENTS.md; then
+            echo "DIPPER_AI_ reference found outside the skill prohibition"; exit 1
+          fi
+          if grep -nE 'DIPPER_AI_[A-Z0-9_]+[[:space:]]*=|env::var\([[:space:]]*"DIPPER_AI_' skills/dipper/SKILL.md; then
+            echo "DIPPER_AI_ assignment or env read in the skill"; exit 1
+          fi
+          if grep -RInE '(^|[^A-Za-z0-9_])rmcp([^A-Za-z0-9_]|$)' Cargo.toml Cargo.lock src; then
+            echo "rmcp MCP crate found"; exit 1
+          fi
+          if grep -RInE 'sk-[A-Za-z0-9]{20,}|api\.anthropic\.com|api\.openai\.com' skills .claude .cursor AGENTS.md src; then
+            echo "external AI client or key found"; exit 1
+          fi
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - name: Default build has no Oracle dependency

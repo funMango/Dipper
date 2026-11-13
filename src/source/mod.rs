@@ -69,6 +69,16 @@ pub struct CatalogColumn {
     pub db_comment: Option<String>,
 }
 
+/// One declared foreign key. Column order follows the dictionary position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogForeignKey {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+    pub target_owner: String,
+    pub target_table: String,
+    pub target_columns: Vec<String>,
+}
+
 /// Table or view shape read from a data dictionary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogTable {
@@ -76,6 +86,15 @@ pub struct CatalogTable {
     pub table_comment: Option<String>,
     pub primary_key: Vec<String>,
     pub columns: Vec<CatalogColumn>,
+    pub foreign_keys: Vec<CatalogForeignKey>,
+}
+
+/// Aggregate overlap counts. No row values are included.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlapCounts {
+    pub source_non_null_rows: u64,
+    pub target_non_null_rows: u64,
+    pub matched_rows: u64,
 }
 
 pub trait Source {
@@ -87,6 +106,29 @@ pub trait Source {
     fn select<'a>(&'a self, spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError>;
     /// Read column, key, and comment metadata. This never reads table rows.
     fn catalog(&self, owner: &str, table: &str) -> Result<CatalogTable, DipperError>;
+    /// Count how source column values overlap a target table. Counts only.
+    fn check_relation(
+        &self,
+        from_owner: &str,
+        from_table: &str,
+        from_columns: &[String],
+        to_owner: &str,
+        to_table: &str,
+        to_columns: &[String],
+    ) -> Result<OverlapCounts, DipperError> {
+        let _ = (
+            from_owner,
+            from_table,
+            from_columns,
+            to_owner,
+            to_table,
+            to_columns,
+        );
+        Err(DipperError::Source {
+            source_name: self.name().to_string(),
+            message: "check-relation is not supported".to_string(),
+        })
+    }
 }
 
 pub(crate) fn cell_text(row: &[Value], index: usize) -> Option<String> {

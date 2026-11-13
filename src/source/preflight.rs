@@ -72,6 +72,9 @@ pub(crate) enum DictQuery {
     AllConstraints,
     AllConsColumns,
     AllConsColumnPositions,
+    AllForeignKeys,
+    AllConstraintTarget,
+    AllConstraintColumns,
     AllIndexes,
     AllIndColumns,
     SqliteMaster,
@@ -118,6 +121,15 @@ impl DictQuery {
             }
             DictQuery::AllConsColumnPositions => {
                 r#"SELECT "CONSTRAINT_NAME", "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
+            }
+            DictQuery::AllForeignKeys => {
+                r#"SELECT "CONSTRAINT_NAME", "R_OWNER", "R_CONSTRAINT_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 AND "CONSTRAINT_TYPE" = :3 AND "STATUS" = :4"#
+            }
+            DictQuery::AllConstraintTarget => {
+                r#"SELECT "TABLE_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#
+            }
+            DictQuery::AllConstraintColumns => {
+                r#"SELECT "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#
             }
             DictQuery::AllIndexes => {
                 r#"SELECT "OWNER", "INDEX_NAME" FROM "ALL_INDEXES" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2 AND "UNIQUENESS" = :3"#
@@ -1147,12 +1159,31 @@ mod tests {
             DictQuery::AllConstraints,
             DictQuery::AllConsColumns,
             DictQuery::AllConsColumnPositions,
+            DictQuery::AllForeignKeys,
+            DictQuery::AllConstraintTarget,
+            DictQuery::AllConstraintColumns,
             DictQuery::AllIndexes,
             DictQuery::AllIndColumns,
             DictQuery::SqliteMaster,
         ] {
             parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
             assert!(!query.sql().contains('\''), "{}", query.sql());
+        }
+    }
+
+    #[test]
+    fn oracle_fk_dictionary_queries_pass_guard() {
+        for query in [
+            DictQuery::AllForeignKeys,
+            DictQuery::AllConstraintTarget,
+            DictQuery::AllConstraintColumns,
+        ] {
+            let parsed = crate::sql::guard::GuardedSelect::parse(query.sql(), query.dialect())
+                .unwrap_or_else(|err| panic!("{query:?}: {err}"));
+            let dict = parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
+            assert_eq!(parsed.sql(), query.sql());
+            assert_eq!(dict.sql(), query.sql());
+            assert_eq!(dict.dialect(), query.dialect());
         }
     }
 
@@ -1208,6 +1239,8 @@ mod tests {
                     "CONSTRAINT_NAME",
                     "CONSTRAINT_TYPE",
                     "STATUS",
+                    "R_OWNER",
+                    "R_CONSTRAINT_NAME",
                 ],
             ),
             (
@@ -1288,6 +1321,9 @@ mod tests {
             DictQuery::AllConstraints,
             DictQuery::AllConsColumns,
             DictQuery::AllConsColumnPositions,
+            DictQuery::AllForeignKeys,
+            DictQuery::AllConstraintTarget,
+            DictQuery::AllConstraintColumns,
             DictQuery::AllIndexes,
             DictQuery::AllIndColumns,
         ];
