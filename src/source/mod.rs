@@ -13,9 +13,7 @@ use crate::config::{Config, Filter, SourceConfig};
 use crate::error::DipperError;
 
 pub use logging::SqlLogSink;
-pub use preflight::{
-    parse_dict, DictQuery, Finding, KeySource, Level, PreflightReport, ResolvedKey,
-};
+pub use preflight::{Finding, KeySource, Level, PreflightReport, ResolvedKey};
 pub use session::SessionStatement;
 pub use sqlite::SqliteSource;
 

@@ -7,7 +7,7 @@ use crate::source::preflight::{parse_dict, DictQuery, Dictionary, Finding, Level
 use crate::source::watchdog::{Breaker, Clock, Watchdog};
 use crate::source::{Chunk, ChunkIter, Value};
 use crate::sql::build::ReadPlan;
-use crate::sql::guard::{GuardedSelect, SqlDialect};
+use crate::sql::guard::{GuardedSelect, GuardedSql, SqlDialect};
 
 /// Fixed statements a source is allowed to run besides a [`GuardedSelect`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,14 +85,14 @@ pub(crate) trait Executor: Send {
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError>;
-    /// Run one already-guarded statement. Overlap checks use this path.
+    /// Run one statement that already passed a SQL guard. Raw strings are not accepted.
     fn open_sql<'a>(
         &'a self,
-        sql: &str,
+        query: &GuardedSql,
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
-        let _ = (sql, binds, fetch_rows);
+        let _ = (query, binds, fetch_rows);
         Err(DipperError::Source {
             source_name: "source".to_string(),
             message: "overlap read is not supported".to_string(),
@@ -276,11 +276,11 @@ impl<E: Executor> Session<E> {
         }
     }
 
-    pub(crate) fn count_sql(&self, sql: &str) -> Result<u64, DipperError> {
+    pub(crate) fn count_sql(&self, query: &GuardedSql) -> Result<u64, DipperError> {
         self.ensure_deadline()?;
         let txn = ReadOnlyTxn::begin(&self.exec)?;
         let read = (|| {
-            let mut cursor = self.exec.open_sql(sql, &[], 1)?;
+            let mut cursor = self.exec.open_sql(query, &[], 1)?;
             let row = cursor.next_row()?.unwrap_or_default();
             count_cell(&row)
         })();

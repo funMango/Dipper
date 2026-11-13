@@ -200,6 +200,16 @@ impl OntologyDoc {
                 }
             }
         }
+        for relation in &self.relations {
+            check_relation_shape(relation)?;
+            for column in &relation.columns {
+                if !names.contains(&column.as_str()) {
+                    return Err(format!(
+                        "relation column {column} is not in the extracted table"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -257,8 +267,17 @@ fn check_pair(columns: &[String], target_columns: &[String], kind: &str) -> Resu
 
 fn check_relation_shape(relation: &Relation) -> Result<(), String> {
     check_pair(&relation.columns, &relation.target_columns, "relation")?;
-    if !relation_name_ok(&relation.target_owner) || !relation_name_ok(&relation.target_table) {
-        return Err("relation target must not contain a path".to_string());
+    for name in relation
+        .columns
+        .iter()
+        .chain(relation.target_columns.iter())
+    {
+        if !relation_token_ok(name) {
+            return Err(format!("relation column {name} is not a safe name"));
+        }
+    }
+    if !relation_token_ok(&relation.target_owner) || !relation_token_ok(&relation.target_table) {
+        return Err("relation target must not contain a path or wikilink".to_string());
     }
     if relation.status == RelationStatus::Draft {
         let Some(evidence) = relation.evidence.as_deref() else {
@@ -271,8 +290,17 @@ fn check_relation_shape(relation: &Relation) -> Result<(), String> {
     Ok(())
 }
 
-fn relation_name_ok(name: &str) -> bool {
-    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+fn relation_token_ok(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains("[[")
+        && !name.contains("]]")
+        && !name.contains('|')
+        && !name.contains('`')
+        && !name.contains('\n')
+        && !name.contains('\r')
 }
 
 pub fn validate(root: &Path) -> Result<(), DipperError> {
@@ -421,6 +449,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unknown"), "{err}");
+    }
+
+    #[test]
+    fn extracted_relations_are_validated_without_an_overlay() {
+        let mut doc = extracted();
+        doc.relations.push(Relation {
+            columns: vec!["QTY".to_string()],
+            target_owner: "main".to_string(),
+            target_table: "OTHER".to_string(),
+            target_columns: vec!["QTY".to_string()],
+            status: RelationStatus::Draft,
+            evidence: Some("same name".to_string()),
+            overlap: None,
+        });
+        let text = serde_json::to_string(&doc).unwrap();
+        parse_doc(&text).unwrap();
+
+        doc.relations[0].target_table = "A[[B".to_string();
+        let err = doc.check().unwrap_err();
+        assert!(err.contains("wikilink") || err.contains("safe"), "{err}");
+        doc.relations[0].target_table = "A]]B".to_string();
+        assert!(doc.check().is_err());
+        doc.relations[0].target_table = "OTHER".to_string();
+        doc.relations[0].evidence = Some("   ".to_string());
+        let err = doc.check().unwrap_err();
+        assert!(err.contains("evidence"), "{err}");
+        doc.relations[0].evidence = Some("same name".to_string());
+        doc.relations[0].columns = vec!["MISSING".to_string()];
+        let err = doc.check().unwrap_err();
+        assert!(err.contains("MISSING"), "{err}");
     }
 
     fn status_name(status: FieldStatus) -> &'static str {

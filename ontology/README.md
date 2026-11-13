@@ -11,7 +11,7 @@ Foreign keys and relations become Obsidian links of the form `[[owner.table]]`.
 
 The extractor leaves `meaning` and `unit` null and sets both statuses to `unknown`.
 A new overlay uses `draft` for a meaning that still needs review. `estimated` remains valid for older overlays.
-A `draft` relation must include evidence. `confirmed` is optional evidence.
+A `draft` relation must include evidence. A `confirmed` relation may leave evidence empty.
 
 `dipper ontology check-relation` prints overlap counts for one candidate relationship.
 It does not print row values. `--format json` is described in [docs/CLI_JSON.md](../docs/CLI_JSON.md).

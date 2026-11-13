@@ -4,7 +4,7 @@ use crate::error::DipperError;
 use crate::source::session::{Executor, RowCursor, SessionStatement};
 use crate::source::watchdog::Breaker;
 use crate::source::Value;
-use crate::sql::guard::{GuardedSelect, SqlDialect};
+use crate::sql::guard::{GuardedSelect, GuardedSql, SqlDialect};
 
 /// Recorded statements. Bind values are never stored.
 pub type SqlLog = Arc<Mutex<Vec<String>>>;
@@ -62,12 +62,12 @@ impl<E: Executor> Executor for LoggingExecutor<E> {
 
     fn open_sql<'a>(
         &'a self,
-        sql: &str,
+        query: &GuardedSql,
         binds: &[crate::source::Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn crate::source::session::RowCursor + 'a>, DipperError> {
-        self.record(sql);
-        self.inner.open_sql(sql, binds, fetch_rows)
+        self.record(query.sql());
+        self.inner.open_sql(query, binds, fetch_rows)
     }
 
     fn open_cursor<'a>(

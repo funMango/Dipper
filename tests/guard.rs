@@ -1,5 +1,4 @@
 use dipper::config::{Filter, FilterOp};
-use dipper::source::{parse_dict, DictQuery};
 use dipper::source::{Paging, SelectSpec};
 use dipper::sql::build::{self, ReadPlan};
 use dipper::sql::guard::{GuardedOverlapSelect, GuardedSelect, SqlDialect};
@@ -231,17 +230,12 @@ fn builder_output_is_guarded_for_every_operator() {
 
 #[test]
 fn oracle_fk_dictionary_queries_pass_guard() {
-    for query in [
-        DictQuery::AllForeignKeys,
-        DictQuery::AllConstraintTarget,
-        DictQuery::AllConstraintColumns,
+    for sql in [
+        r#"SELECT "CONSTRAINT_NAME", "R_OWNER", "R_CONSTRAINT_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 AND "CONSTRAINT_TYPE" = :3 AND "STATUS" = :4"#,
+        r#"SELECT "TABLE_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#,
+        r#"SELECT "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#,
     ] {
-        let parsed = GuardedSelect::parse(query.sql(), SqlDialect::Oracle)
-            .unwrap_or_else(|err| panic!("{:?}: {err}", query));
-        let dict = parse_dict(query).unwrap_or_else(|err| panic!("{:?}: {err}", query));
-        assert_eq!(parsed.sql(), query.sql());
-        assert_eq!(dict.sql(), query.sql());
-        assert_eq!(dict.dialect(), SqlDialect::Oracle);
+        accept(sql, SqlDialect::Oracle);
     }
 }
 
@@ -270,6 +264,14 @@ fn guarded_overlap_select_allows_only_exists_count_template() {
         r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID") GROUP BY "A"."CROSS_ID""#,
         r#"SELECT COUNT(*), "A"."CROSS_ID" FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID")"#,
         r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = 'KEYCANARY-9a2f')"#,
+        "SELECT COUNT(*) FROM \"ORDERS\" \"A\" WHERE \"A\".\"CROSS_ID\" IS NOT NULL AND EXISTS (SELECT 1 FROM \"INTERSECTIONS\" \"B\" WHERE \"B\".\"CROSS_ID\" = \"A\".\"CROSS_ID\") -- note",
+        "SELECT COUNT(*) FROM \"ORDERS\" \"A\" WHERE \"A\".\"CROSS_ID\" IS NOT NULL /* c */ AND EXISTS (SELECT 1 FROM \"INTERSECTIONS\" \"B\" WHERE \"B\".\"CROSS_ID\" = \"A\".\"CROSS_ID\")",
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID"); SELECT 1"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID")"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."OTHER")"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "C" WHERE "C"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "C"."CROSS_ID")"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "D" WHERE "D"."CROSS_ID" = "A"."CROSS_ID")"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 2 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID")"#,
     ];
     for sql in rejected {
         assert!(

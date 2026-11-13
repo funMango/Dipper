@@ -17,7 +17,7 @@ use crate::source::{
     ChunkIter, OpenOptions, Opened, Paging, PreflightReport, SelectSpec, Source, Value,
 };
 use crate::sql::build;
-use crate::sql::guard::{GuardedSelect, SqlDialect};
+use crate::sql::guard::{GuardedSelect, GuardedSql, SqlDialect};
 
 pub struct SqliteSource {
     session: Session<LoggingExecutor<SqliteExec>>,
@@ -150,34 +150,16 @@ impl Executor for SqliteExec {
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
-        self.open_sql(query.sql(), binds, fetch_rows)
+        self.open_statement(query.sql(), binds, fetch_rows)
     }
 
     fn open_sql<'a>(
         &'a self,
-        sql: &str,
+        query: &GuardedSql,
         binds: &[Value],
-        _fetch_rows: usize,
+        fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
-        let statement = Box::new(self.conn.prepare(sql).map_err(|err| self.fail(err))?);
-        let columns: Vec<String> = statement.column_names().map(str::to_string).collect();
-        let params: Vec<Bound> = binds.iter().cloned().map(Bound).collect();
-        let statement = Box::into_raw(statement);
-        let rows = match unsafe { query_erased(statement, &params) } {
-            Ok(rows) => rows,
-            Err(err) => {
-                // SAFETY: `query` failed before a row stream existed, so nothing borrows
-                // this statement. The pointer came from `Box::into_raw`.
-                unsafe { drop(Box::from_raw(statement)) };
-                return Err(self.fail(err));
-            }
-        };
-        Ok(Box::new(SqliteStream {
-            statement,
-            rows,
-            columns,
-            name: self.name.clone(),
-        }))
+        self.open_statement(query.sql(), binds, fetch_rows)
     }
 
     fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
@@ -211,6 +193,35 @@ impl Executor for SqliteExec {
                 .map_err(|err| self.fail(err))?;
         }
         Ok(())
+    }
+}
+
+impl SqliteExec {
+    fn open_statement<'a>(
+        &'a self,
+        sql: &str,
+        binds: &[Value],
+        _fetch_rows: usize,
+    ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
+        let statement = Box::new(self.conn.prepare(sql).map_err(|err| self.fail(err))?);
+        let columns: Vec<String> = statement.column_names().map(str::to_string).collect();
+        let params: Vec<Bound> = binds.iter().cloned().map(Bound).collect();
+        let statement = Box::into_raw(statement);
+        let rows = match unsafe { query_erased(statement, &params) } {
+            Ok(rows) => rows,
+            Err(err) => {
+                // SAFETY: `query` failed before a row stream existed, so nothing borrows
+                // this statement. The pointer came from `Box::into_raw`.
+                unsafe { drop(Box::from_raw(statement)) };
+                return Err(self.fail(err));
+            }
+        };
+        Ok(Box::new(SqliteStream {
+            statement,
+            rows,
+            columns,
+            name: self.name.clone(),
+        }))
     }
 }
 
@@ -541,10 +552,13 @@ fn run_overlap(
     let target_sql = non_null_count(dialect, to_table, to_columns)?;
     let matched =
         crate::sql::build::overlap_counts(dialect, from_table, from_columns, to_table, to_columns)?;
+    let source_sql = GuardedSql::from(source_sql);
+    let target_sql = GuardedSql::from(target_sql);
+    let matched = GuardedSql::from(matched);
     Ok(crate::source::OverlapCounts {
-        source_non_null_rows: session.count_sql(source_sql.sql())?,
-        target_non_null_rows: session.count_sql(target_sql.sql())?,
-        matched_rows: session.count_sql(matched.sql())?,
+        source_non_null_rows: session.count_sql(&source_sql)?,
+        target_non_null_rows: session.count_sql(&target_sql)?,
+        matched_rows: session.count_sql(&matched)?,
     })
 }
 
@@ -759,6 +773,23 @@ mod tests {
             .columns
             .iter()
             .any(|column| column.name == "ORDER_ID"));
+    }
+
+    #[test]
+    fn check_relation_rejects_non_main_schema() {
+        let _lock = crate::source::session::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = sample(dir.path());
+        let src = connect("t", &path);
+        let columns = vec!["ORDER_ID".to_string()];
+        let err = src
+            .check_relation("other", "ORDERS", &columns, "main", "ORDERS", &columns)
+            .unwrap_err();
+        assert!(err.to_string().contains("only main"), "{err}");
+        let err = src
+            .check_relation("main", "ORDERS", &columns, "TEMP", "ORDERS", &columns)
+            .unwrap_err();
+        assert!(err.to_string().contains("only main"), "{err}");
     }
 
     #[test]

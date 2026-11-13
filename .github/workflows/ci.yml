@@ -77,8 +77,14 @@ jobs:
           for phrase in "ontology pull" "check-relation" "ontology validate" "ontology render" "DIPPER_ORA_USER" "DIPPER_ORA_PASSWORD" "DIPPER_AI_" "GuardedSelect"; do
             grep -q "$phrase" skills/dipper/SKILL.md || { echo "missing skill phrase: $phrase"; exit 1; }
           done
-          if grep -RInE 'DIPPER_AI_[A-Z0-9_]+[[:space:]]*=' skills .claude .cursor AGENTS.md src; then
-            echo "DIPPER_AI_ assignment found"; exit 1
+          if grep -RInE 'DIPPER_AI_' src .claude .cursor AGENTS.md; then
+            echo "DIPPER_AI_ reference found outside the skill prohibition"; exit 1
+          fi
+          if grep -nE 'DIPPER_AI_[A-Z0-9_]+[[:space:]]*=|env::var\([[:space:]]*"DIPPER_AI_' skills/dipper/SKILL.md; then
+            echo "DIPPER_AI_ assignment or env read in the skill"; exit 1
+          fi
+          if grep -RInE '(^|[^A-Za-z0-9_])rmcp([^A-Za-z0-9_]|$)' Cargo.toml Cargo.lock src; then
+            echo "rmcp MCP crate found"; exit 1
           fi
           if grep -RInE 'sk-[A-Za-z0-9]{20,}|api\.anthropic\.com|api\.openai\.com' skills .claude .cursor AGENTS.md src; then
             echo "external AI client or key found"; exit 1

@@ -10,6 +10,10 @@
 //! ```compile_fail
 //! let _g = dipper::sql::guard::GuardedSelect::from(String::new());
 //! ```
+//!
+//! ```compile_fail
+//! let _g = dipper::sql::guard::GuardedSql::from("SELECT 1");
+//! ```
 
 use std::ops::ControlFlow;
 
@@ -471,6 +475,43 @@ impl GuardedOverlapSelect {
     }
 }
 
+/// A statement that already passed [`GuardedSelect::parse`] or [`GuardedOverlapSelect::parse`].
+///
+/// Session reads take this type so a raw SQL string cannot reach the driver.
+#[derive(Debug, Clone)]
+pub enum GuardedSql {
+    Select(GuardedSelect),
+    Overlap(GuardedOverlapSelect),
+}
+
+impl GuardedSql {
+    pub fn sql(&self) -> &str {
+        match self {
+            Self::Select(query) => query.sql(),
+            Self::Overlap(query) => query.sql(),
+        }
+    }
+
+    pub fn dialect(&self) -> SqlDialect {
+        match self {
+            Self::Select(query) => query.dialect(),
+            Self::Overlap(query) => query.dialect(),
+        }
+    }
+}
+
+impl From<GuardedSelect> for GuardedSql {
+    fn from(query: GuardedSelect) -> Self {
+        Self::Select(query)
+    }
+}
+
+impl From<GuardedOverlapSelect> for GuardedSql {
+    fn from(query: GuardedOverlapSelect) -> Self {
+        Self::Overlap(query)
+    }
+}
+
 fn check_overlap_query(query: &Query, dialect: SqlDialect) -> Result<(), GuardError> {
     reject_query_extras(query)?;
     let select = plain_select(query)?;
@@ -583,7 +624,10 @@ fn reject_query_extras(query: &Query) -> Result<(), GuardError> {
         || query.limit_clause.is_some()
         || query.fetch.is_some()
         || query.for_clause.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
         || !query.locks.is_empty()
+        || !query.pipe_operators.is_empty()
     {
         return Err(GuardError(
             "overlap check cannot have extra clauses".to_string(),

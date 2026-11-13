@@ -32,9 +32,11 @@ pub fn render(root: &Path) -> Result<Vec<PathBuf>, DipperError> {
         }
         std::fs::write(&md_path, markdown(&merged))
             .map_err(|err| ontology_error(err.to_string()))?;
-        hubs.entry(merged.source.clone())
-            .or_default()
-            .push(format!("[[{}.{}]]", merged.owner, merged.table));
+        hubs.entry(merged.source.clone()).or_default().push(format!(
+            "[[{}.{}]]",
+            inline(&merged.owner),
+            inline(&merged.table)
+        ));
         written.push(md_path);
     }
     for (source, mut links) in hubs {
@@ -57,7 +59,11 @@ pub fn render(root: &Path) -> Result<Vec<PathBuf>, DipperError> {
 
 fn markdown(doc: &OntologyDoc) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# {}.{}\n\n", doc.owner, doc.table));
+    out.push_str(&format!(
+        "# {}.{}\n\n",
+        inline(&doc.owner),
+        inline(&doc.table)
+    ));
     out.push_str(&format!("- source: {}\n", doc.source));
     out.push_str(&format!("- object_type: {}\n", doc.object_type));
     out.push_str(&format!(
@@ -92,13 +98,13 @@ fn markdown(doc: &OntologyDoc) -> String {
         for key in &doc.foreign_keys {
             let mut line = format!(
                 "- `{}` -> [[{}.{}]] (`{}`)",
-                key.columns.join(", "),
-                key.target_owner,
-                key.target_table,
-                key.target_columns.join(", ")
+                code_list(&key.columns),
+                inline(&key.target_owner),
+                inline(&key.target_table),
+                code_list(&key.target_columns)
             );
             if let Some(name) = &key.name {
-                line.push_str(&format!(" ({name})"));
+                line.push_str(&format!(" ({})", inline(name)));
             }
             out.push_str(&line);
             out.push('\n');
@@ -115,14 +121,14 @@ fn markdown(doc: &OntologyDoc) -> String {
             };
             let mut line = format!(
                 "- [{label}] `{}` -> [[{}.{}]] (`{}`)",
-                relation.columns.join(", "),
-                relation.target_owner,
-                relation.target_table,
-                relation.target_columns.join(", ")
+                code_list(&relation.columns),
+                inline(&relation.target_owner),
+                inline(&relation.target_table),
+                code_list(&relation.target_columns)
             );
             if let Some(evidence) = relation.evidence.as_deref().filter(|text| !text.is_empty()) {
                 line.push_str(" — ");
-                line.push_str(evidence);
+                line.push_str(&inline(evidence));
             }
             if let Some(overlap) = &relation.overlap {
                 let percent = overlap.match_ratio * 100.0;
@@ -148,7 +154,32 @@ fn status(status: crate::ontology::schema::FieldStatus) -> &'static str {
 }
 
 fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace('\n', " ")
+    inline(text)
+}
+
+fn code_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| inline(name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Keep a name from opening an Obsidian link or breaking a Markdown table or code span.
+fn inline(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '`' => out.push_str("\\`"),
+            '[' => out.push_str("\\["),
+            ']' => out.push_str("\\]"),
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn extracted_to_overlay(root: &Path, extracted: &Path) -> PathBuf {
@@ -185,4 +216,67 @@ fn json_files(dir: &Path) -> Vec<PathBuf> {
     }
     files.sort();
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ontology::schema::{
+        FieldStatus, ForeignKey, OntologyColumn, OntologyDoc, Relation, RelationStatus, VERSION,
+    };
+
+    #[test]
+    fn render_escapes_wikilink_and_markdown_breaks() {
+        let doc = OntologyDoc {
+            version: VERSION,
+            source: "sample".to_string(),
+            owner: "A[[B".to_string(),
+            table: "T|X".to_string(),
+            extracted_at: "2026-11-11T00:00:00Z".to_string(),
+            object_type: "TABLE".to_string(),
+            table_comment: None,
+            primary_key: Vec::new(),
+            time_column: None,
+            foreign_keys: vec![ForeignKey {
+                name: Some("fk`1".to_string()),
+                columns: vec!["COL|1".to_string()],
+                target_owner: "]]evil".to_string(),
+                target_table: "[[note".to_string(),
+                target_columns: vec!["TO|1".to_string()],
+            }],
+            relations: vec![Relation {
+                columns: vec!["COL|1".to_string()],
+                target_owner: "main".to_string(),
+                target_table: "[[other".to_string(),
+                target_columns: vec!["ID".to_string()],
+                status: RelationStatus::Draft,
+                evidence: Some("see [[secret]]\nnext".to_string()),
+                overlap: None,
+            }],
+            columns: vec![OntologyColumn {
+                name: "COL|1".to_string(),
+                data_type: "TEXT".to_string(),
+                data_length: None,
+                data_precision: None,
+                data_scale: None,
+                nullable: true,
+                is_virtual: false,
+                db_comment: None,
+                meaning: None,
+                meaning_status: FieldStatus::Unknown,
+                unit: None,
+                unit_status: FieldStatus::Unknown,
+            }],
+        };
+        let md = markdown(&doc);
+        assert!(md.contains("# A\\[\\[B.T\\|X"), "{md}");
+        assert!(md.contains("[[\\]\\]evil.\\[\\[note]]"), "{md}");
+        assert!(md.contains("[[main.\\[\\[other]]"), "{md}");
+        assert!(md.contains("`COL\\|1`"), "{md}");
+        assert!(md.contains("see \\[\\[secret\\]\\] next"), "{md}");
+        assert!(md.contains("(fk\\`1)"), "{md}");
+        assert!(!md.contains("[[A[[B"), "{md}");
+        assert!(!md.contains("[[secret]]"), "{md}");
+        assert!(!md.contains("fk`1"), "{md}");
+    }
 }

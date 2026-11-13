@@ -56,7 +56,7 @@ pub fn blocks(report: &PreflightReport, strict: bool) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DictQuery {
+pub(crate) enum DictQuery {
     UserUsers,
     SessionPrivs,
     SessionRoles,
@@ -81,7 +81,7 @@ pub enum DictQuery {
 }
 
 impl DictQuery {
-    pub fn sql(self) -> &'static str {
+    pub(crate) fn sql(self) -> &'static str {
         match self {
             DictQuery::UserUsers => r#"SELECT "USERNAME" FROM "USER_USERS""#,
             DictQuery::SessionPrivs => r#"SELECT "PRIVILEGE" FROM "SESSION_PRIVS""#,
@@ -155,7 +155,7 @@ pub(crate) trait Dictionary {
     fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError>;
 }
 
-pub fn parse_dict(query: DictQuery) -> Result<GuardedSelect, DipperError> {
+pub(crate) fn parse_dict(query: DictQuery) -> Result<GuardedSelect, DipperError> {
     Ok(GuardedSelect::parse(query.sql(), query.dialect())?)
 }
 
@@ -1168,6 +1168,22 @@ mod tests {
         ] {
             parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
             assert!(!query.sql().contains('\''), "{}", query.sql());
+        }
+    }
+
+    #[test]
+    fn oracle_fk_dictionary_queries_pass_guard() {
+        for query in [
+            DictQuery::AllForeignKeys,
+            DictQuery::AllConstraintTarget,
+            DictQuery::AllConstraintColumns,
+        ] {
+            let parsed = crate::sql::guard::GuardedSelect::parse(query.sql(), query.dialect())
+                .unwrap_or_else(|err| panic!("{query:?}: {err}"));
+            let dict = parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
+            assert_eq!(parsed.sql(), query.sql());
+            assert_eq!(dict.sql(), query.sql());
+            assert_eq!(dict.dialect(), query.dialect());
         }
     }
 

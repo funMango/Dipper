@@ -678,6 +678,65 @@ password = "${DIPPER_PR3B_PASSWORD}"
     }
 }
 
+#[cfg(feature = "oracle")]
+#[test]
+fn check_relation_redacts_short_oracle_password_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1521/NOPE"
+user = "reader"
+password = "${DIPPER_PR3B_PASSWORD}"
+"#,
+    );
+    for format in [Some("json"), None] {
+        let mut command = common::dipper();
+        command
+            .current_dir(dir.path())
+            .env("DIPPER_PR3B_PASSWORD", "1047")
+            .args(["--config"])
+            .arg(&config)
+            .args([
+                "ontology",
+                "check-relation",
+                "company",
+                "--from-table",
+                "SALES.ORDERS",
+                "--from-column",
+                "ORDER_ID",
+                "--to-table",
+                "SALES.CUSTOMERS",
+                "--to-column",
+                "CUSTOMER_ID",
+            ]);
+        if let Some(format) = format {
+            command.args(["--format", format]);
+        }
+        let output = command.assert().code(1).get_output().clone();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let combined = format!("{stdout}{stderr}");
+        assert!(!combined.contains("1047"), "{combined}");
+        assert!(!combined.contains("reader"), "{combined}");
+        assert!(!combined.contains("127.0.0.1:1521/NOPE"), "{combined}");
+        assert!(
+            combined.contains("details withheld")
+                || combined.contains("driver message hidden because it contained the password"),
+            "{combined}"
+        );
+        if format == Some("json") {
+            let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(doc["ok"], false);
+            assert_eq!(doc["command"], "ontology.check_relation");
+            let message = doc["error"]["message"].as_str().unwrap();
+            assert!(!message.contains("1047"), "{message}");
+        }
+    }
+}
+
 #[test]
 fn dictionary_sql_is_logged_only_with_log_sql() {
     let dir = tempfile::tempdir().unwrap();
