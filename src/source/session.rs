@@ -85,6 +85,19 @@ pub(crate) trait Executor: Send {
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError>;
+    /// Run one already-guarded statement. Overlap checks use this path.
+    fn open_sql<'a>(
+        &'a self,
+        sql: &str,
+        binds: &[Value],
+        fetch_rows: usize,
+    ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
+        let _ = (sql, binds, fetch_rows);
+        Err(DipperError::Source {
+            source_name: "source".to_string(),
+            message: "overlap read is not supported".to_string(),
+        })
+    }
     /// A fixed catalog statement, such as a SQLite `PRAGMA table_xinfo`.
     fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
         let _ = sql;
@@ -240,12 +253,40 @@ impl<E: Executor> Session<E> {
             message,
         })?;
         let sql = format!("PRAGMA table_xinfo(\"{table}\")");
+        self.read_fixed_sql(&sql)
+    }
+
+    pub(crate) fn read_foreign_keys(&self, table: &str) -> Result<Vec<Vec<Value>>, DipperError> {
+        crate::sql::validate_column_ident(table).map_err(|message| DipperError::Source {
+            source_name: self.source_name.clone(),
+            message,
+        })?;
+        let sql = format!("PRAGMA foreign_key_list(\"{table}\")");
+        self.read_fixed_sql(&sql)
+    }
+
+    fn read_fixed_sql(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
         self.ensure_deadline()?;
         let txn = ReadOnlyTxn::begin(&self.exec)?;
-        let read = self.exec.read_fixed(&sql);
+        let read = self.exec.read_fixed(sql);
         let rolled = txn.finish();
         match (read, rolled) {
             (Ok(rows), Ok(())) => Ok(rows),
+            (Err(err), _) | (Ok(_), Err(err)) => Err(err),
+        }
+    }
+
+    pub(crate) fn count_sql(&self, sql: &str) -> Result<u64, DipperError> {
+        self.ensure_deadline()?;
+        let txn = ReadOnlyTxn::begin(&self.exec)?;
+        let read = (|| {
+            let mut cursor = self.exec.open_sql(sql, &[], 1)?;
+            let row = cursor.next_row()?.unwrap_or_default();
+            count_cell(&row)
+        })();
+        let rolled = txn.finish();
+        match (read, rolled) {
+            (Ok(count), Ok(())) => Ok(count),
             (Err(err), _) | (Ok(_), Err(err)) => Err(err),
         }
     }
@@ -316,6 +357,32 @@ impl<E: Executor> Dictionary for Session<E> {
         let guarded = parse_dict(query)?;
         self.read_all(&guarded, binds)
     }
+}
+
+fn count_cell(row: &[Value]) -> Result<u64, DipperError> {
+    let value = row.first();
+    let count = match value {
+        Some(Value::Int(number)) if *number >= 0 => *number as u64,
+        Some(Value::Text(text)) if text.bytes().all(|byte| byte.is_ascii_digit()) => {
+            text.parse::<u64>().map_err(|_| DipperError::Source {
+                source_name: "source".to_string(),
+                message: "COUNT(*) returned an unexpected value".to_string(),
+            })?
+        }
+        Some(Value::Float(number))
+            if number.is_finite() && *number >= 0.0 && number.fract() == 0.0 =>
+        {
+            *number as u64
+        }
+        Some(Value::Null) | None => 0,
+        _ => {
+            return Err(DipperError::Source {
+                source_name: "source".to_string(),
+                message: "COUNT(*) returned an unexpected value".to_string(),
+            })
+        }
+    };
+    Ok(count)
 }
 
 fn apply_setup<E: Executor>(exec: &E, _opts: &SessionOptions) -> Result<Vec<Finding>, DipperError> {

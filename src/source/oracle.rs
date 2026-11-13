@@ -10,8 +10,8 @@ use crate::source::preflight::{blocks, DictQuery, Dictionary};
 use crate::source::session::{Executor, RowCursor, Session, SessionOptions, SessionStatement};
 use crate::source::watchdog::{Breaker, SystemClock};
 use crate::source::{
-    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogTable, ChunkIter, OpenOptions,
-    Opened, Paging, PreflightReport, SelectSpec, Source, Value,
+    cell_i64, cell_text, session_deadline, CatalogColumn, CatalogForeignKey, CatalogTable,
+    ChunkIter, OpenOptions, Opened, Paging, PreflightReport, SelectSpec, Source, Value,
 };
 use crate::sql::build;
 use crate::sql::guard::{GuardedSelect, SqlDialect};
@@ -150,10 +150,19 @@ impl Executor for OracleExec {
         binds: &[Value],
         fetch_rows: usize,
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
+        self.open_sql(query.sql(), binds, fetch_rows)
+    }
+
+    fn open_sql<'a>(
+        &'a self,
+        sql: &str,
+        binds: &[Value],
+        fetch_rows: usize,
+    ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
         let size = u32::try_from(fetch_rows.max(1)).unwrap_or(u32::MAX);
         let statement = self
             .conn
-            .statement(query.sql())
+            .statement(sql)
             .fetch_array_size(size)
             .prefetch_rows(size)
             .build()
@@ -492,7 +501,11 @@ impl Source for OracleSource {
             .and_then(|row| cell_text(row, 0));
         let constraints = self.session.rows(
             DictQuery::AllConstraints,
-            &[owner_bind, table_bind, Value::Text("ENABLED".to_string())],
+            &[
+                owner_bind.clone(),
+                table_bind.clone(),
+                Value::Text("ENABLED".to_string()),
+            ],
         )?;
         let pk_names: Vec<String> = constraints
             .iter()
@@ -519,13 +532,196 @@ impl Source for OracleSource {
             keyed.push((position, name));
         }
         keyed.sort_by_key(|(position, _)| *position);
+        let primary_key = keyed.into_iter().map(|(_, name)| name).collect();
+        let foreign_keys = oracle_foreign_keys(self, &owner_bind, &table_bind, &positions)?;
         Ok(CatalogTable {
             object_type: object_type.to_string(),
             table_comment,
-            primary_key: keyed.into_iter().map(|(_, name)| name).collect(),
+            primary_key,
             columns,
+            foreign_keys,
         })
     }
+
+    fn check_relation(
+        &self,
+        from_owner: &str,
+        from_table: &str,
+        from_columns: &[String],
+        to_owner: &str,
+        to_table: &str,
+        to_columns: &[String],
+    ) -> Result<crate::source::OverlapCounts, DipperError> {
+        for name in [from_owner, from_table, to_owner, to_table] {
+            crate::sql::validate_ident(name)
+                .map_err(|message| message_error(self.name(), message))?;
+        }
+        for column in from_columns.iter().chain(to_columns) {
+            crate::sql::validate_column_ident(column)
+                .map_err(|message| message_error(self.name(), message))?;
+        }
+        if from_columns.len() != to_columns.len() {
+            return Err(message_error(
+                self.name(),
+                "from and to column counts must match",
+            ));
+        }
+        let from = format!("{from_owner}.{from_table}");
+        let to = format!("{to_owner}.{to_table}");
+        let source_sql = non_null_count(SqlDialect::Oracle, &from, from_columns)?;
+        let target_sql = non_null_count(SqlDialect::Oracle, &to, to_columns)?;
+        let matched = crate::sql::build::overlap_counts(
+            SqlDialect::Oracle,
+            &from,
+            from_columns,
+            &to,
+            to_columns,
+        )?;
+        Ok(crate::source::OverlapCounts {
+            source_non_null_rows: self.session.count_sql(source_sql.sql())?,
+            target_non_null_rows: self.session.count_sql(target_sql.sql())?,
+            matched_rows: self.session.count_sql(matched.sql())?,
+        })
+    }
+}
+
+fn non_null_count(
+    dialect: SqlDialect,
+    table: &str,
+    columns: &[String],
+) -> Result<GuardedSelect, DipperError> {
+    let filters = columns
+        .iter()
+        .map(|column| crate::config::Filter {
+            column: column.clone(),
+            op: crate::config::FilterOp::NotNull,
+            value: None,
+        })
+        .collect();
+    let spec = crate::source::SelectSpec {
+        table: table.to_string(),
+        columns: vec![columns.first().cloned().unwrap_or_default()],
+        filters,
+        limit: None,
+        batch_rows: 1,
+        key: None,
+        paging: crate::source::Paging::Snapshot,
+    };
+    Ok(crate::sql::build::count(dialect, &spec)?.0)
+}
+
+type ConstraintTarget = Option<(String, Vec<String>)>;
+type TargetCache = std::collections::BTreeMap<(String, String), ConstraintTarget>;
+
+fn oracle_foreign_keys(
+    source: &OracleSource,
+    owner: &Value,
+    table: &Value,
+    positions: &[Vec<Value>],
+) -> Result<Vec<CatalogForeignKey>, DipperError> {
+    let keys = source.session.rows(
+        DictQuery::AllForeignKeys,
+        &[
+            owner.clone(),
+            table.clone(),
+            Value::Text("R".to_string()),
+            Value::Text("ENABLED".to_string()),
+        ],
+    )?;
+    let mut cache: TargetCache = std::collections::BTreeMap::new();
+    let mut foreign_keys = Vec::new();
+    for row in &keys {
+        let Some(name) = cell_text(row, 0) else {
+            continue;
+        };
+        let Some(target_owner) = cell_text(row, 1) else {
+            continue;
+        };
+        let Some(target_constraint) = cell_text(row, 2) else {
+            continue;
+        };
+        let columns = constraint_columns(positions, &name);
+        let cached = match cache.get(&(target_owner.clone(), target_constraint.clone())) {
+            Some(found) => found.clone(),
+            None => {
+                let found = oracle_target(source, &target_owner, &target_constraint)?;
+                cache.insert(
+                    (target_owner.clone(), target_constraint.clone()),
+                    found.clone(),
+                );
+                found
+            }
+        };
+        let Some((target_table, target_columns)) = cached else {
+            continue;
+        };
+        if columns.is_empty() || columns.len() != target_columns.len() {
+            return Err(message_error(
+                source.name(),
+                format!("foreign key {name} column counts do not match"),
+            ));
+        }
+        foreign_keys.push(CatalogForeignKey {
+            name: Some(name),
+            columns,
+            target_owner,
+            target_table,
+            target_columns,
+        });
+    }
+    Ok(foreign_keys)
+}
+
+fn constraint_columns(positions: &[Vec<Value>], constraint: &str) -> Vec<String> {
+    let mut keyed = Vec::new();
+    for row in positions {
+        if cell_text(row, 0).as_deref() != Some(constraint) {
+            continue;
+        }
+        let Some(name) = cell_text(row, 1) else {
+            continue;
+        };
+        let position = cell_i64(row, 2).ok().flatten().unwrap_or(i64::MAX);
+        keyed.push((position, name));
+    }
+    keyed.sort_by_key(|(position, _)| *position);
+    keyed.into_iter().map(|(_, name)| name).collect()
+}
+
+fn oracle_target(
+    source: &OracleSource,
+    owner: &str,
+    constraint: &str,
+) -> Result<Option<(String, Vec<String>)>, DipperError> {
+    let binds = [
+        Value::Text(owner.to_string()),
+        Value::Text(constraint.to_string()),
+    ];
+    let tables = source
+        .session
+        .rows(DictQuery::AllConstraintTarget, &binds)?;
+    let Some(target_table) = tables.first().and_then(|row| cell_text(row, 0)) else {
+        return Ok(None);
+    };
+    let columns = source
+        .session
+        .rows(DictQuery::AllConstraintColumns, &binds)?;
+    if columns.is_empty() {
+        return Ok(None);
+    }
+    let mut keyed = Vec::new();
+    for row in &columns {
+        let Some(name) = cell_text(row, 0) else {
+            continue;
+        };
+        let position = cell_i64(row, 1).ok().flatten().unwrap_or(i64::MAX);
+        keyed.push((position, name));
+    }
+    keyed.sort_by_key(|(position, _)| *position);
+    Ok(Some((
+        target_table,
+        keyed.into_iter().map(|(_, name)| name).collect(),
+    )))
 }
 
 /// Turn one `COUNT(*)` cell into a row count.

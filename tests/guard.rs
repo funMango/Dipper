@@ -1,7 +1,8 @@
 use dipper::config::{Filter, FilterOp};
+use dipper::source::{parse_dict, DictQuery};
 use dipper::source::{Paging, SelectSpec};
 use dipper::sql::build::{self, ReadPlan};
-use dipper::sql::guard::{GuardedSelect, SqlDialect};
+use dipper::sql::guard::{GuardedOverlapSelect, GuardedSelect, SqlDialect};
 
 fn reject(sql: &str, dialect: SqlDialect) {
     let err = GuardedSelect::parse(sql, dialect).expect_err(sql);
@@ -189,6 +190,9 @@ fn accepts_probes_and_dictionary_queries() {
         r#"SELECT "CONSTRAINT_NAME", "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#,
         r#"SELECT "CONSTRAINT_NAME", "CONSTRAINT_TYPE" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 AND "STATUS" = :3"#,
         r#"SELECT "CONSTRAINT_NAME", "COLUMN_NAME" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#,
+        r#"SELECT "CONSTRAINT_NAME", "R_OWNER", "R_CONSTRAINT_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 AND "CONSTRAINT_TYPE" = :3 AND "STATUS" = :4"#,
+        r#"SELECT "TABLE_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#,
+        r#"SELECT "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#,
         r#"SELECT "OWNER", "INDEX_NAME" FROM "ALL_INDEXES" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2 AND "UNIQUENESS" = :3"#,
         r#"SELECT "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME" FROM "ALL_IND_COLUMNS" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2"#,
     ];
@@ -222,6 +226,60 @@ fn builder_output_is_guarded_for_every_operator() {
                 assert!(query.sql().contains("COUNT(*)"), "{}", query.sql());
             }
         }
+    }
+}
+
+#[test]
+fn oracle_fk_dictionary_queries_pass_guard() {
+    for query in [
+        DictQuery::AllForeignKeys,
+        DictQuery::AllConstraintTarget,
+        DictQuery::AllConstraintColumns,
+    ] {
+        let parsed = GuardedSelect::parse(query.sql(), SqlDialect::Oracle)
+            .unwrap_or_else(|err| panic!("{:?}: {err}", query));
+        let dict = parse_dict(query).unwrap_or_else(|err| panic!("{:?}: {err}", query));
+        assert_eq!(parsed.sql(), query.sql());
+        assert_eq!(dict.sql(), query.sql());
+        assert_eq!(dict.dialect(), SqlDialect::Oracle);
+    }
+}
+
+#[test]
+fn guarded_overlap_select_allows_only_exists_count_template() {
+    let allowed = [
+        (
+            SqlDialect::Sqlite,
+            r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID")"#,
+        ),
+        (
+            SqlDialect::Oracle,
+            r#"SELECT COUNT(*) FROM "SALES"."ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND "A"."PART" IS NOT NULL AND EXISTS (SELECT 1 FROM "SALES"."INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID" AND "B"."PART" = "A"."PART")"#,
+        ),
+    ];
+    for (dialect, sql) in allowed {
+        let guarded = GuardedOverlapSelect::parse(sql, dialect)
+            .unwrap_or_else(|err| panic!("{dialect:?}: {err}"));
+        assert_eq!(guarded.sql(), sql);
+        reject(sql, dialect);
+    }
+    let rejected = [
+        r#"SELECT * FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID")"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" = 'x' AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID")"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" JOIN "INTERSECTIONS" "B" ON "B"."CROSS_ID" = "A"."CROSS_ID""#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID") GROUP BY "A"."CROSS_ID""#,
+        r#"SELECT COUNT(*), "A"."CROSS_ID" FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = "A"."CROSS_ID")"#,
+        r#"SELECT COUNT(*) FROM "ORDERS" "A" WHERE "A"."CROSS_ID" IS NOT NULL AND EXISTS (SELECT 1 FROM "INTERSECTIONS" "B" WHERE "B"."CROSS_ID" = 'KEYCANARY-9a2f')"#,
+    ];
+    for sql in rejected {
+        assert!(
+            GuardedOverlapSelect::parse(sql, SqlDialect::Sqlite).is_err(),
+            "{sql}"
+        );
+        assert!(
+            GuardedOverlapSelect::parse(sql, SqlDialect::Oracle).is_err(),
+            "{sql}"
+        );
     }
 }
 

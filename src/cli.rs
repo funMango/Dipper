@@ -67,6 +67,26 @@ pub enum OntologyCommand {
     Render,
     /// Reject an overlay or extracted document that does not match the schema.
     Validate,
+    /// Count how values in one table overlap another. Counts only, no row values.
+    CheckRelation {
+        /// Source name from the config file.
+        source: String,
+        /// Source table, `OWNER.TABLE`. SQLite may omit the owner.
+        #[arg(long)]
+        from_table: String,
+        /// Source column. Repeat for a composite key.
+        #[arg(long, required = true)]
+        from_column: Vec<String>,
+        /// Target table, `OWNER.TABLE`. SQLite may omit the owner.
+        #[arg(long)]
+        to_table: String,
+        /// Target column. Repeat once per `--from-column`.
+        #[arg(long, required = true)]
+        to_column: Vec<String>,
+        /// stdout format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
 }
 
 /// Subcommands. Arguments are added in later PRs.
@@ -194,6 +214,25 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
                 OntologyCommand::Validate => {
                     crate::commands::ontology::validate_docs(std::path::Path::new("."), &mut handle)
                 }
+                OntologyCommand::CheckRelation {
+                    source,
+                    from_table,
+                    from_column,
+                    to_table,
+                    to_column,
+                    format,
+                } => crate::commands::ontology::check_relation(
+                    &cli.config,
+                    &source,
+                    &from_table,
+                    &from_column,
+                    &to_table,
+                    &to_column,
+                    cli.log_sql,
+                    cli.strict,
+                    format,
+                    &mut handle,
+                ),
             }
         }
         Command::Tables => Err(DipperError::NotImplemented("tables")),

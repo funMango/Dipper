@@ -60,6 +60,16 @@ impl<E: Executor> Executor for LoggingExecutor<E> {
         self.inner.run_session(stmt)
     }
 
+    fn open_sql<'a>(
+        &'a self,
+        sql: &str,
+        binds: &[crate::source::Value],
+        fetch_rows: usize,
+    ) -> Result<Box<dyn crate::source::session::RowCursor + 'a>, DipperError> {
+        self.record(sql);
+        self.inner.open_sql(sql, binds, fetch_rows)
+    }
+
     fn open_cursor<'a>(
         &'a self,
         query: &GuardedSelect,

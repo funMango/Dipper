@@ -56,7 +56,7 @@ pub fn blocks(report: &PreflightReport, strict: bool) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DictQuery {
+pub enum DictQuery {
     UserUsers,
     SessionPrivs,
     SessionRoles,
@@ -72,13 +72,16 @@ pub(crate) enum DictQuery {
     AllConstraints,
     AllConsColumns,
     AllConsColumnPositions,
+    AllForeignKeys,
+    AllConstraintTarget,
+    AllConstraintColumns,
     AllIndexes,
     AllIndColumns,
     SqliteMaster,
 }
 
 impl DictQuery {
-    pub(crate) fn sql(self) -> &'static str {
+    pub fn sql(self) -> &'static str {
         match self {
             DictQuery::UserUsers => r#"SELECT "USERNAME" FROM "USER_USERS""#,
             DictQuery::SessionPrivs => r#"SELECT "PRIVILEGE" FROM "SESSION_PRIVS""#,
@@ -119,6 +122,15 @@ impl DictQuery {
             DictQuery::AllConsColumnPositions => {
                 r#"SELECT "CONSTRAINT_NAME", "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2"#
             }
+            DictQuery::AllForeignKeys => {
+                r#"SELECT "CONSTRAINT_NAME", "R_OWNER", "R_CONSTRAINT_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "TABLE_NAME" = :2 AND "CONSTRAINT_TYPE" = :3 AND "STATUS" = :4"#
+            }
+            DictQuery::AllConstraintTarget => {
+                r#"SELECT "TABLE_NAME" FROM "ALL_CONSTRAINTS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#
+            }
+            DictQuery::AllConstraintColumns => {
+                r#"SELECT "COLUMN_NAME", "POSITION" FROM "ALL_CONS_COLUMNS" WHERE "OWNER" = :1 AND "CONSTRAINT_NAME" = :2"#
+            }
             DictQuery::AllIndexes => {
                 r#"SELECT "OWNER", "INDEX_NAME" FROM "ALL_INDEXES" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2 AND "UNIQUENESS" = :3"#
             }
@@ -143,7 +155,7 @@ pub(crate) trait Dictionary {
     fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError>;
 }
 
-pub(crate) fn parse_dict(query: DictQuery) -> Result<GuardedSelect, DipperError> {
+pub fn parse_dict(query: DictQuery) -> Result<GuardedSelect, DipperError> {
     Ok(GuardedSelect::parse(query.sql(), query.dialect())?)
 }
 
@@ -1147,6 +1159,9 @@ mod tests {
             DictQuery::AllConstraints,
             DictQuery::AllConsColumns,
             DictQuery::AllConsColumnPositions,
+            DictQuery::AllForeignKeys,
+            DictQuery::AllConstraintTarget,
+            DictQuery::AllConstraintColumns,
             DictQuery::AllIndexes,
             DictQuery::AllIndColumns,
             DictQuery::SqliteMaster,
@@ -1208,6 +1223,8 @@ mod tests {
                     "CONSTRAINT_NAME",
                     "CONSTRAINT_TYPE",
                     "STATUS",
+                    "R_OWNER",
+                    "R_CONSTRAINT_NAME",
                 ],
             ),
             (
@@ -1288,6 +1305,9 @@ mod tests {
             DictQuery::AllConstraints,
             DictQuery::AllConsColumns,
             DictQuery::AllConsColumnPositions,
+            DictQuery::AllForeignKeys,
+            DictQuery::AllConstraintTarget,
+            DictQuery::AllConstraintColumns,
             DictQuery::AllIndexes,
             DictQuery::AllIndColumns,
         ];

@@ -12,6 +12,8 @@ pub fn render(root: &Path) -> Result<Vec<PathBuf>, DipperError> {
         return Ok(Vec::new());
     }
     let mut written = Vec::new();
+    let mut hubs: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for path in json_files(&extracted) {
         let text = std::fs::read_to_string(&path).map_err(|err| ontology_error(err.to_string()))?;
         let doc = parse_doc(&text).map_err(ontology_error)?;
@@ -30,7 +32,24 @@ pub fn render(root: &Path) -> Result<Vec<PathBuf>, DipperError> {
         }
         std::fs::write(&md_path, markdown(&merged))
             .map_err(|err| ontology_error(err.to_string()))?;
+        hubs.entry(merged.source.clone())
+            .or_default()
+            .push(format!("[[{}.{}]]", merged.owner, merged.table));
         written.push(md_path);
+    }
+    for (source, mut links) in hubs {
+        links.sort();
+        links.dedup();
+        let index = root.join("ontology/md").join(&source).join("_index.md");
+        if let Some(parent) = index.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| ontology_error(err.to_string()))?;
+        }
+        let mut body = format!("# {source}\n\n");
+        for link in &links {
+            body.push_str(&format!("- {link}\n"));
+        }
+        std::fs::write(&index, body).map_err(|err| ontology_error(err.to_string()))?;
+        written.push(index);
     }
     written.sort();
     Ok(written)
@@ -65,12 +84,64 @@ fn markdown(doc: &OntologyDoc) -> String {
             status(column.unit_status),
         ));
     }
+    out.push('\n');
+    out.push_str("## Foreign Keys\n");
+    if doc.foreign_keys.is_empty() {
+        out.push_str("- (none)\n");
+    } else {
+        for key in &doc.foreign_keys {
+            let mut line = format!(
+                "- `{}` -> [[{}.{}]] (`{}`)",
+                key.columns.join(", "),
+                key.target_owner,
+                key.target_table,
+                key.target_columns.join(", ")
+            );
+            if let Some(name) = &key.name {
+                line.push_str(&format!(" ({name})"));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out.push_str("## Relations\n");
+    if doc.relations.is_empty() {
+        out.push_str("- (none)\n");
+    } else {
+        for relation in &doc.relations {
+            let label = match relation.status {
+                crate::ontology::schema::RelationStatus::Draft => "draft",
+                crate::ontology::schema::RelationStatus::Confirmed => "confirmed",
+            };
+            let mut line = format!(
+                "- [{label}] `{}` -> [[{}.{}]] (`{}`)",
+                relation.columns.join(", "),
+                relation.target_owner,
+                relation.target_table,
+                relation.target_columns.join(", ")
+            );
+            if let Some(evidence) = relation.evidence.as_deref().filter(|text| !text.is_empty()) {
+                line.push_str(" — ");
+                line.push_str(evidence);
+            }
+            if let Some(overlap) = &relation.overlap {
+                let percent = overlap.match_ratio * 100.0;
+                line.push_str(&format!(
+                    " (overlap: {}/{}, {percent:.1}%)",
+                    overlap.matched_rows, overlap.source_non_null_rows
+                ));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
     out
 }
 
 fn status(status: crate::ontology::schema::FieldStatus) -> &'static str {
     match status {
         crate::ontology::schema::FieldStatus::Confirmed => "confirmed",
+        crate::ontology::schema::FieldStatus::Draft => "draft",
         crate::ontology::schema::FieldStatus::Estimated => "estimated",
         crate::ontology::schema::FieldStatus::Unknown => "unknown",
     }
