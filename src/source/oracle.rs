@@ -37,6 +37,7 @@ impl OracleSource {
         if conn.autocommit() {
             drop(conn);
             return Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: name.to_owned(),
                 message: "autocommit is enabled; refusing the connection".to_owned(),
             });
@@ -137,6 +138,7 @@ impl Executor for OracleExec {
                 .map_err(|err| self.fail(err)),
             SessionStatement::SqliteQueryOnly | SessionStatement::SqliteBegin => {
                 Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: self.name.clone(),
                     message: "session statement is not valid for oracle".to_owned(),
                 })
@@ -188,11 +190,13 @@ impl OracleExec {
             .map_err(|err| self.fail(err))?;
         if statement.statement_type() != oracle::StatementType::Select {
             return Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: self.name.clone(),
                 message: "prepared statement is not a SELECT".to_owned(),
             });
         }
         let owned = bind_values(binds).map_err(|message| DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
             source_name: self.name.clone(),
             message,
         })?;
@@ -392,6 +396,7 @@ impl Source for OracleSource {
         let rows = self.session.read_all(&query, &binds)?;
         count_from_value(rows.first().and_then(|row| row.first())).map_err(|message| {
             DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: self.name().to_owned(),
                 message,
             }
@@ -402,6 +407,7 @@ impl Source for OracleSource {
         let report = self.preflight(&spec.table, spec)?;
         if blocks(&report, self.session.strict()) {
             return Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: self.name().to_owned(),
                 message: "preflight blocked the read".to_owned(),
             });
@@ -414,6 +420,7 @@ impl Source for OracleSource {
                     .clone()
                     .or_else(|| report.key.map(|key| key.column))
                     .ok_or_else(|| DipperError::Source {
+                        kind: crate::error::ErrorKind::Other,
                         source_name: self.name().to_owned(),
                         message: "no key; set key or paging = \"snapshot\"".to_owned(),
                     })?;
@@ -596,6 +603,118 @@ impl Source for OracleSource {
             target_non_null_rows: self.session.count_sql(&target_sql)?,
             matched_rows: self.session.count_sql(&matched)?,
         })
+    }
+
+    fn list_tables(
+        &self,
+        owner: &str,
+        name_like: &str,
+        limit: usize,
+    ) -> Result<crate::source::CatalogPage<crate::source::CatalogEntry>, DipperError> {
+        crate::sql::validate_ident(owner).map_err(|message| message_error(self.name(), message))?;
+        let owner_bind = Value::Text(owner.to_string());
+        let pattern = Value::Text(name_like.to_string());
+        let mut entries = Vec::new();
+        for kind in ["TABLE", "VIEW"] {
+            let rows = self.session.rows(
+                DictQuery::ListObjects,
+                &[
+                    owner_bind.clone(),
+                    Value::Text(kind.to_string()),
+                    pattern.clone(),
+                ],
+            )?;
+            for row in rows {
+                let Some(table) = cell_text(&row, 0) else {
+                    continue;
+                };
+                let object_type = cell_text(&row, 1).unwrap_or_else(|| kind.to_string());
+                if object_type != "TABLE" && object_type != "VIEW" {
+                    continue;
+                }
+                entries.push(crate::source::CatalogEntry {
+                    owner: owner.to_string(),
+                    table,
+                    object_type,
+                    comment: None,
+                    num_rows_estimate: None,
+                });
+            }
+        }
+        let comments = self.session.rows(
+            DictQuery::ListTabComments,
+            std::slice::from_ref(&owner_bind),
+        )?;
+        let mut comment_of = std::collections::BTreeMap::new();
+        for row in comments {
+            if let Some(table) = cell_text(&row, 0) {
+                comment_of.insert(table, cell_text(&row, 1));
+            }
+        }
+        let stats = self
+            .session
+            .rows(DictQuery::ListTableStats, std::slice::from_ref(&owner_bind))?;
+        let mut rows_of = std::collections::BTreeMap::new();
+        for row in stats {
+            if let Some(table) = cell_text(&row, 0) {
+                rows_of.insert(table, cell_i64(&row, 1).ok().flatten());
+            }
+        }
+        for entry in &mut entries {
+            entry.comment = comment_of.get(&entry.table).cloned().flatten();
+            entry.num_rows_estimate = rows_of.get(&entry.table).copied().flatten();
+        }
+        entries.sort_by(|left, right| {
+            left.table
+                .cmp(&right.table)
+                .then(left.owner.cmp(&right.owner))
+        });
+        Ok(crate::source::take_page(entries, limit))
+    }
+
+    fn find_columns(
+        &self,
+        column: &str,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::source::CatalogPage<crate::source::ColumnHit>, DipperError> {
+        let column = column.to_ascii_uppercase();
+        crate::sql::validate_column_ident(&column)
+            .map_err(|message| message_error(self.name(), message))?;
+        if let Some(owner) = owner {
+            crate::sql::validate_ident(owner)
+                .map_err(|message| message_error(self.name(), message))?;
+        }
+        let rows = self
+            .session
+            .rows(DictQuery::FindColumns, &[Value::Text(column)])?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let Some(hit_owner) = cell_text(&row, 0) else {
+                continue;
+            };
+            if owner.is_some_and(|owner| !owner.eq_ignore_ascii_case(&hit_owner)) {
+                continue;
+            }
+            let Some(table) = cell_text(&row, 1) else {
+                continue;
+            };
+            hits.push(crate::source::ColumnHit {
+                owner: hit_owner,
+                table,
+                data_type: cell_text(&row, 2).unwrap_or_default(),
+                data_length: cell_i64(&row, 3).ok().flatten(),
+                data_precision: cell_i64(&row, 4).ok().flatten(),
+                data_scale: cell_i64(&row, 5).ok().flatten(),
+                nullable: cell_text(&row, 6).as_deref() == Some("Y"),
+            });
+        }
+        hits.sort_by(|left, right| {
+            left.owner
+                .cmp(&right.owner)
+                .then(left.table.cmp(&right.table))
+        });
+        Ok(crate::source::take_page(hits, limit))
     }
 }
 
@@ -806,9 +925,11 @@ fn unsigned_whole_float(value: f64) -> Option<u64> {
 }
 
 fn message_error(name: &str, message: impl Into<String>) -> DipperError {
+    let message = message.into();
     DipperError::Source {
         source_name: name.to_string(),
-        message: message.into(),
+        kind: crate::error::ErrorKind::from_text(&message),
+        message,
     }
 }
 
@@ -821,6 +942,7 @@ fn oracle_error(name: &str, err: &oracle::Error, secret: Option<&Secret>) -> Dip
     };
     DipperError::Source {
         source_name: name.to_owned(),
+        kind: crate::error::ErrorKind::from_text(&message),
         message,
     }
 }

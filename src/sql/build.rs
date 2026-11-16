@@ -107,6 +107,7 @@ pub fn overlap_counts(
 ) -> Result<GuardedOverlapSelect, DipperError> {
     if from_columns.is_empty() || from_columns.len() != to_columns.len() {
         return Err(DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
             source_name: "sql".to_string(),
             message: "overlap columns must match".to_string(),
         });

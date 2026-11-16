@@ -524,6 +524,7 @@ impl Iterator for FailAfter<'_> {
         if self.yielded >= 2 {
             self.inner.take();
             return Some(Err(DipperError::Source {
+                kind: dipper::error::ErrorKind::Other,
                 source_name: "sample".to_string(),
                 message: "injected failure".to_string(),
             }));
@@ -2416,7 +2417,7 @@ columns = ["ITEM_ID"]
     let doc = json_doc(&stdout);
     assert_eq!(doc["dips"][0]["name"], "missing");
     assert_eq!(doc["dips"][0]["status"], "failed");
-    assert!(doc["dips"][0]["error"].is_string());
+    assert!(doc["dips"][0]["error"]["message"].is_string());
     assert_eq!(doc["dips"][1]["name"], "items");
     assert_eq!(doc["dips"][1]["status"], "not_run");
     assert_eq!(doc["dips"][1]["rows_loaded"], 0);

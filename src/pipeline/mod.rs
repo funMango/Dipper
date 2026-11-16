@@ -770,6 +770,7 @@ mod tests {
             self.calls.lock().unwrap().select += 1;
             if self.fail_select {
                 return Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: "sample".to_string(),
                     message: self
                         .select_error
@@ -789,6 +790,7 @@ mod tests {
             _table: &str,
         ) -> Result<crate::source::CatalogTable, DipperError> {
             Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: "sample".to_string(),
                 message: "catalog is not used by this probe".to_string(),
             })
@@ -814,6 +816,7 @@ mod tests {
         ) -> Result<Opened, DipperError> {
             if let Some(message) = &self.fail_open {
                 return Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: name.to_string(),
                     message: message.clone(),
                 });
@@ -1142,7 +1145,7 @@ columns = ["ORDER_ID", "TS"]
         .unwrap_err();
         let stdout = String::from_utf8(stdout).unwrap();
         let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-        let dip_error = doc["dips"][0]["error"].as_str().unwrap();
+        let dip_error = doc["dips"][0]["error"]["message"].as_str().unwrap();
         assert_no_leak("json", &stdout);
         assert_no_leak("dip error", dip_error);
         assert!(

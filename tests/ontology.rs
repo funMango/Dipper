@@ -26,6 +26,123 @@ path = "source.db"
     )
 }
 
+fn catalog_db(dir: &Path) {
+    let conn = rusqlite::Connection::open(dir.join("source.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE NODE_A (CROSS_ID TEXT, QTY INTEGER);
+         CREATE TABLE NODE_B (cross_id TEXT);
+         CREATE TABLE OTHER (NAME TEXT);
+         CREATE VIEW NODE_V AS SELECT CROSS_ID FROM NODE_A;
+         INSERT INTO NODE_A (CROSS_ID, QTY) VALUES ('ROWVAL_SENTINEL_9', 1);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn list_returns_tables_views_and_honors_name_like_and_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    catalog_db(dir.path());
+    let config = config(dir.path());
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args(["ontology", "list", "sample", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["command"], "ontology.list");
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(doc["tables"].as_array().unwrap().len(), 4);
+    let names: Vec<&str> = doc["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["table"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["NODE_A", "NODE_B", "NODE_V", "OTHER"]);
+
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "list",
+            "sample",
+            "--name-like",
+            "NODE%",
+            "--limit",
+            "2",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["tables"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn find_column_returns_exact_matches_ignoring_case() {
+    let dir = tempfile::tempdir().unwrap();
+    catalog_db(dir.path());
+    let config = config(dir.path());
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology", "find", "sample", "--column", "cross_id", "--format", "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["command"], "ontology.find");
+    assert_eq!(doc["column"], "cross_id");
+    let tables: Vec<&str> = doc["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["table"].as_str().unwrap())
+        .collect();
+    assert_eq!(tables, ["NODE_A", "NODE_B"]);
+}
+
+#[test]
+fn list_and_find_json_hide_row_values() {
+    let dir = tempfile::tempdir().unwrap();
+    catalog_db(dir.path());
+    let config = config(dir.path());
+    for args in [
+        vec!["ontology", "list", "sample", "--format", "json"],
+        vec![
+            "ontology", "find", "sample", "--column", "CROSS_ID", "--format", "json",
+        ],
+    ] {
+        let output = common::dipper()
+            .current_dir(dir.path())
+            .args(["--config"])
+            .arg(&config)
+            .args(args)
+            .assert()
+            .code(0)
+            .get_output()
+            .clone();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!stdout.contains("ROWVAL_SENTINEL_9"), "{stdout}");
+        assert!(!stderr.contains("ROWVAL_SENTINEL_9"), "{stderr}");
+    }
+}
+
 fn pull(dir: &Path, config: &Path, extra: &[&str]) -> assert_cmd::assert::Assert {
     let mut command = common::dipper();
     command.current_dir(dir).args(["--config"]).arg(config);

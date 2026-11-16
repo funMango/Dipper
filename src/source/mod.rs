@@ -89,6 +89,41 @@ pub struct CatalogTable {
     pub foreign_keys: Vec<CatalogForeignKey>,
 }
 
+/// One table or view from a dictionary listing. No row values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogEntry {
+    pub owner: String,
+    pub table: String,
+    pub object_type: String,
+    pub comment: Option<String>,
+    pub num_rows_estimate: Option<i64>,
+}
+
+/// One column hit from a dictionary search. No row values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnHit {
+    pub owner: String,
+    pub table: String,
+    pub data_type: String,
+    pub data_length: Option<i64>,
+    pub data_precision: Option<i64>,
+    pub data_scale: Option<i64>,
+    pub nullable: bool,
+}
+
+/// A limited dictionary page. `truncated` means at least one more row existed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogPage<T> {
+    pub items: Vec<T>,
+    pub truncated: bool,
+}
+
+pub(crate) fn take_page<T>(mut items: Vec<T>, limit: usize) -> CatalogPage<T> {
+    let truncated = items.len() > limit;
+    items.truncate(limit);
+    CatalogPage { items, truncated }
+}
+
 /// Aggregate overlap counts. No row values are included.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlapCounts {
@@ -125,8 +160,37 @@ pub trait Source {
             to_columns,
         );
         Err(DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
             source_name: self.name().to_string(),
             message: "check-relation is not supported".to_string(),
+        })
+    }
+    /// List tables and views from the dictionary. This never reads table rows.
+    fn list_tables(
+        &self,
+        owner: &str,
+        name_like: &str,
+        limit: usize,
+    ) -> Result<CatalogPage<CatalogEntry>, DipperError> {
+        let _ = (owner, name_like, limit);
+        Err(DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
+            source_name: self.name().to_string(),
+            message: "ontology list is not supported".to_string(),
+        })
+    }
+    /// Find tables that have a column. This never reads table rows.
+    fn find_columns(
+        &self,
+        column: &str,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Result<CatalogPage<ColumnHit>, DipperError> {
+        let _ = (column, owner, limit);
+        Err(DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
+            source_name: self.name().to_string(),
+            message: "ontology find is not supported".to_string(),
         })
     }
 }
@@ -266,6 +330,7 @@ fn open_oracle(
         opts,
     );
     Err(DipperError::Source {
+        kind: crate::error::ErrorKind::Other,
         source_name: name.to_string(),
         message: "oracle support is not built in (build with --features oracle)".to_string(),
     })

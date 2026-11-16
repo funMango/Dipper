@@ -1,5 +1,7 @@
 //! Shared text helpers for command output.
 
+use serde::Serialize;
+
 use crate::config::{Config, SourceConfig};
 use crate::error::DipperError;
 
@@ -8,6 +10,34 @@ use crate::error::DipperError;
 /// The whole message is replaced. Pieces of the secret are not left in place,
 /// because a short value such as `1` or `DPI` would show where it had been.
 pub const SECRET_WITHHELD: &str = "details withheld";
+
+/// JSON `error` object shared by every `--format json` command.
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorBody {
+    pub code: String,
+    pub retryable: bool,
+    pub message: String,
+}
+
+impl ErrorBody {
+    pub fn from_error(err: &DipperError) -> Self {
+        Self {
+            code: err.kind().code().to_string(),
+            retryable: err.retryable(),
+            message: err.error_message(),
+        }
+    }
+
+    pub fn from_text(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let kind = crate::error::ErrorKind::from_text(&message);
+        Self {
+            code: kind.code().to_string(),
+            retryable: kind.retryable(),
+            message,
+        }
+    }
+}
 
 const ALREADY_HIDDEN_DRIVER: &str = "(driver message hidden because it contained the password)";
 
@@ -90,6 +120,7 @@ pub fn redact_error(error: DipperError, secrets: &[KnownSecret]) -> DipperError 
     } else {
         DipperError::Source {
             source_name: "dip".to_string(),
+            kind: error.kind(),
             message: hidden,
         }
     }
@@ -227,7 +258,8 @@ fn code_at<'a>(text: &'a str, index: usize, prefix: &str, digits: usize) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_parts, redact_known_values, KnownSecret, SECRET_WITHHELD};
+    use super::{connect_parts, redact_error, redact_known_values, KnownSecret, SECRET_WITHHELD};
+    use crate::error::{DipperError, ErrorKind};
 
     fn secret(value: &str) -> KnownSecret {
         KnownSecret {
@@ -363,5 +395,51 @@ mod tests {
         let got = redact_known_values("ORA-01017: logon denied for READER", &[user("reader")]);
         assert_eq!(got, format!("ORA-01017 {SECRET_WITHHELD}"));
         assert!(!got.to_ascii_lowercase().contains("reader"));
+    }
+
+    #[test]
+    fn redact_error_keeps_object_not_found_when_owner_matches_user() {
+        let err = DipperError::Source {
+            source_name: "company".to_string(),
+            kind: ErrorKind::ObjectNotFound,
+            message: "object not found: crsrd.T".to_string(),
+        };
+        let hidden = redact_error(err, &[user("CRSRD")]);
+        assert_eq!(hidden.kind(), ErrorKind::ObjectNotFound);
+        assert!(!hidden.retryable());
+        assert_eq!(hidden.error_message(), SECRET_WITHHELD);
+        assert!(!hidden
+            .error_message()
+            .to_ascii_lowercase()
+            .contains("crsrd"));
+        let body = super::ErrorBody::from_error(&hidden);
+        assert_eq!(body.code, "object_not_found");
+        assert!(!body.retryable);
+        assert_eq!(body.message, SECRET_WITHHELD);
+        let shown = hidden.to_string();
+        assert!(shown.contains("[object_not_found]"), "{shown}");
+        assert!(shown.contains(SECRET_WITHHELD), "{shown}");
+    }
+
+    #[test]
+    fn driver_codes_map_to_error_kinds() {
+        let cases = [
+            ("DPI-1047: client missing", ErrorKind::ClientMissing, false),
+            ("ORA-01017: invalid username", ErrorKind::AuthFailed, false),
+            ("ORA-12170: timeout", ErrorKind::ConnectFailed, true),
+            ("ORA-12541: no listener", ErrorKind::ConnectFailed, true),
+            ("ORA-12514: service", ErrorKind::ConnectFailed, true),
+            ("ORA-12537: packet", ErrorKind::ConnectFailed, true),
+            ("DPI-1080: connection", ErrorKind::ConnectFailed, true),
+            ("ORA-00942: table", ErrorKind::ObjectNotFound, false),
+            ("ORA-04043: object", ErrorKind::ObjectNotFound, false),
+            ("ORA-01031: privilege", ErrorKind::PermissionDenied, false),
+            ("DPI-1067: call timeout", ErrorKind::Timeout, true),
+            ("ORA-03136: inbound", ErrorKind::Timeout, true),
+        ];
+        for (text, kind, retryable) in cases {
+            assert_eq!(ErrorKind::from_text(text), kind, "{text}");
+            assert_eq!(kind.retryable(), retryable, "{text}");
+        }
     }
 }

@@ -77,7 +77,12 @@ pub(crate) enum DictQuery {
     AllConstraintColumns,
     AllIndexes,
     AllIndColumns,
+    ListObjects,
+    ListTabComments,
+    ListTableStats,
+    FindColumns,
     SqliteMaster,
+    SqliteListObjects,
 }
 
 impl DictQuery {
@@ -137,15 +142,30 @@ impl DictQuery {
             DictQuery::AllIndColumns => {
                 r#"SELECT "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME" FROM "ALL_IND_COLUMNS" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2"#
             }
+            DictQuery::ListObjects => {
+                r#"SELECT "OBJECT_NAME", "OBJECT_TYPE" FROM "ALL_OBJECTS" WHERE "OWNER" = :1 AND "OBJECT_TYPE" = :2 AND "OBJECT_NAME" LIKE :3"#
+            }
+            DictQuery::ListTabComments => {
+                r#"SELECT "TABLE_NAME", "COMMENTS" FROM "ALL_TAB_COMMENTS" WHERE "OWNER" = :1"#
+            }
+            DictQuery::ListTableStats => {
+                r#"SELECT "TABLE_NAME", "NUM_ROWS" FROM "ALL_TABLES" WHERE "OWNER" = :1"#
+            }
+            DictQuery::FindColumns => {
+                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1"#
+            }
             DictQuery::SqliteMaster => {
                 r#"SELECT "type", "sql" FROM "sqlite_master" WHERE "name" = ?"#
+            }
+            DictQuery::SqliteListObjects => {
+                r#"SELECT "name", "type" FROM "sqlite_master" WHERE "type" = ? AND "name" LIKE ?"#
             }
         }
     }
 
     pub(crate) fn dialect(self) -> SqlDialect {
         match self {
-            DictQuery::SqliteMaster => SqlDialect::Sqlite,
+            DictQuery::SqliteMaster | DictQuery::SqliteListObjects => SqlDialect::Sqlite,
             _ => SqlDialect::Oracle,
         }
     }
@@ -512,6 +532,7 @@ fn walk_view(dict: &dyn Dictionary, view: &ObjectRef, findings: &mut Vec<Finding
                 findings,
                 dip,
                 &DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: dip.to_string(),
                     message: "view dependency limit exceeded".to_string(),
                 },
@@ -1022,6 +1043,7 @@ mod tests {
         fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError> {
             if self.fail.contains(&query) {
                 return Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: "dict".to_string(),
                     message: "not permitted".to_string(),
                 });
@@ -1164,7 +1186,12 @@ mod tests {
             DictQuery::AllConstraintColumns,
             DictQuery::AllIndexes,
             DictQuery::AllIndColumns,
+            DictQuery::ListObjects,
+            DictQuery::ListTabComments,
+            DictQuery::ListTableStats,
+            DictQuery::FindColumns,
             DictQuery::SqliteMaster,
+            DictQuery::SqliteListObjects,
         ] {
             parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
             assert!(!query.sql().contains('\''), "{}", query.sql());
@@ -1254,6 +1281,7 @@ mod tests {
                 ],
             ),
             ("ALL_OBJECTS", &["OWNER", "OBJECT_NAME", "OBJECT_TYPE"]),
+            ("ALL_TABLES", &["OWNER", "TABLE_NAME", "NUM_ROWS"]),
             (
                 "ALL_SYNONYMS",
                 &[
@@ -1326,6 +1354,10 @@ mod tests {
             DictQuery::AllConstraintColumns,
             DictQuery::AllIndexes,
             DictQuery::AllIndColumns,
+            DictQuery::ListObjects,
+            DictQuery::ListTabComments,
+            DictQuery::ListTableStats,
+            DictQuery::FindColumns,
         ];
         for query in queries {
             let sql = query.sql();
@@ -1359,6 +1391,25 @@ mod tests {
             }
         }
         assert!(DictQuery::AllTabCols.sql().contains("\"VIRTUAL_COLUMN\""));
+    }
+
+    #[test]
+    fn discovery_dictionary_queries_pass_guard() {
+        for query in [
+            DictQuery::ListObjects,
+            DictQuery::ListTabComments,
+            DictQuery::ListTableStats,
+            DictQuery::FindColumns,
+        ] {
+            let sql = query.sql();
+            assert!(!sql.contains('\''), "{sql}");
+            assert!(!sql.to_ascii_uppercase().contains(" JOIN "), "{sql}");
+            assert!(!sql.to_ascii_uppercase().contains(" ORDER BY "), "{sql}");
+            assert!(!sql.to_ascii_uppercase().contains("FETCH"), "{sql}");
+            let parsed = parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
+            assert_eq!(parsed.sql(), sql);
+            assert_eq!(parsed.dialect(), SqlDialect::Oracle);
+        }
     }
 
     fn quoted_idents(sql: &str) -> Vec<&str> {

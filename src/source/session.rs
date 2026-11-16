@@ -94,6 +94,7 @@ pub(crate) trait Executor: Send {
     ) -> Result<Box<dyn RowCursor + 'a>, DipperError> {
         let _ = (query, binds, fetch_rows);
         Err(DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
             source_name: "source".to_string(),
             message: "overlap read is not supported".to_string(),
         })
@@ -102,6 +103,7 @@ pub(crate) trait Executor: Send {
     fn read_fixed(&self, sql: &str) -> Result<Vec<Vec<Value>>, DipperError> {
         let _ = sql;
         Err(DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
             source_name: "source".to_string(),
             message: "fixed catalog read is not supported".to_string(),
         })
@@ -249,6 +251,7 @@ impl<E: Executor> Session<E> {
 
     pub(crate) fn read_pragma(&self, table: &str) -> Result<Vec<Vec<Value>>, DipperError> {
         crate::sql::validate_column_ident(table).map_err(|message| DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
             source_name: self.source_name.clone(),
             message,
         })?;
@@ -258,6 +261,7 @@ impl<E: Executor> Session<E> {
 
     pub(crate) fn read_foreign_keys(&self, table: &str) -> Result<Vec<Vec<Value>>, DipperError> {
         crate::sql::validate_column_ident(table).map_err(|message| DipperError::Source {
+            kind: crate::error::ErrorKind::Other,
             source_name: self.source_name.clone(),
             message,
         })?;
@@ -365,6 +369,7 @@ fn count_cell(row: &[Value]) -> Result<u64, DipperError> {
         Some(Value::Int(number)) if *number >= 0 => *number as u64,
         Some(Value::Text(text)) if text.bytes().all(|byte| byte.is_ascii_digit()) => {
             text.parse::<u64>().map_err(|_| DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: "source".to_string(),
                 message: "COUNT(*) returned an unexpected value".to_string(),
             })?
@@ -377,6 +382,7 @@ fn count_cell(row: &[Value]) -> Result<u64, DipperError> {
         Some(Value::Null) | None => 0,
         _ => {
             return Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: "source".to_string(),
                 message: "COUNT(*) returned an unexpected value".to_string(),
             })
@@ -443,6 +449,7 @@ impl<E: Executor> Iterator for KeysetIter<'_, E> {
                 None => {
                     self.done = true;
                     return Some(Err(DipperError::Source {
+                        kind: crate::error::ErrorKind::Other,
                         source_name: self.session.source_name.clone(),
                         message: "keyset plan is missing the next page".to_string(),
                     }));
@@ -808,6 +815,7 @@ mod tests {
         fn run_session(&self, stmt: SessionStatement) -> Result<(), DipperError> {
             if stmt == SessionStatement::OraReadOnlySession && self.fail_read_only {
                 return Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: "fake".to_string(),
                     message: "READ_ONLY failed".to_string(),
                 });
@@ -849,6 +857,7 @@ mod tests {
                 .push(query.sql().to_string());
             if self.fail_select_on == Some(nth) {
                 return Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: "fake".to_string(),
                     message: "select failed".to_string(),
                 });

@@ -4,6 +4,20 @@ Use this skill when a person asks to pull a Dipper ontology, fill in meanings, f
 
 Run only the Dipper CLI. Do not open a database driver yourself.
 
+## Environment
+
+Start with `dipper check --env-only`. It reports `executable`, `config`, `oracle_feature`, and `instant_client` without opening a database. The report names environment variables and does not print their values. Fix a `fail` item before pulling data. Oracle setup is `docs/ORACLE_SETUP.md`.
+
+## Find candidates
+
+Do not guess table names and `pull` until one works. When a foreign key is missing:
+
+1. Run `dipper ontology find <source> --column <KEY> [--owner OWNER] --format json` to list tables that have that column.
+2. Run `dipper ontology list <source> --owner OWNER [--name-like PAT] --format json` for name patterns such as `%NODE%` or `%MST%`.
+3. `pull` only the tables you still need.
+
+`list` and `find` read the dictionary only. They do not return row values.
+
 ## Ontology and relationships
 
 1. Run `dipper ontology pull <source> [--table OWNER.TABLE] --format json`.
@@ -34,11 +48,13 @@ Run:
 
 Add `--refresh` only when the person asks to reload a range that is already stored.
 
-Explain the JSON in the person's language: `period`, `held`, `fetch`, `COUNT`, `ignored_filters`, `nothing_to_fetch`, `rows_loaded`, `error`, and the exit code (`0` success, `1` failure, `2` usage).
+Explain the JSON in the person's language: `period`, `held`, `fetch`, `COUNT`, `ignored_filters`, `nothing_to_fetch`, `rows_loaded`, `error` (`code`, `retryable`, `message`), and the exit code (`0` success, `1` failure, `2` usage).
+
+If `error.retryable` is true, wait 5 seconds and run that command once more. If it fails again, tell the person. Never retry `object_not_found`. Dipper itself does not retry.
 
 ## Never do this
 
 - Do not put source row values, DuckDB row samples, passwords, connect strings, or database usernames into the model context, the conversation, a file, or an overlay. Config examples use only the variable names `DIPPER_ORA_USER` and `DIPPER_ORA_PASSWORD`.
-- Do not bypass `GuardedSelect`, `READ_ONLY`, or binds, and do not connect with another driver. The allowed commands are `ontology pull`, `ontology validate`, `ontology render`, `ontology check-relation`, and `dip`.
+- Do not bypass `GuardedSelect`, `READ_ONLY`, or binds, and do not connect with another driver. The allowed commands are `check`, `ontology list`, `ontology find`, `ontology pull`, `ontology validate`, `ontology render`, `ontology check-relation`, and `dip`.
 - Do not add `DIPPER_AI_*` settings, API keys, or cost limits to the Dipper source.
 - Do not merge a pull request unless the person explicitly approves it.

@@ -237,7 +237,10 @@ fn authorize(ctx: AuthContext<'_>) -> Authorization {
         AuthAction::Transaction {
             operation: TransactionOperation::Begin | TransactionOperation::Rollback,
         } => Authorization::Allow,
-        AuthAction::Function { function_name } if function_name.eq_ignore_ascii_case("count") => {
+        AuthAction::Function { function_name }
+            if function_name.eq_ignore_ascii_case("count")
+                || function_name.eq_ignore_ascii_case("like") =>
+        {
             Authorization::Allow
         }
         AuthAction::Pragma {
@@ -320,11 +323,13 @@ impl RowCursor for SqliteStream<'_> {
             Ok(Some(row)) => read_row(row, width)
                 .map(Some)
                 .map_err(|err| DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: name,
                     message: err.to_string(),
                 }),
             Ok(None) => Ok(None),
             Err(err) => Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: name,
                 message: err.to_string(),
             }),
@@ -376,6 +381,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn source_error(name: &str, message: String) -> DipperError {
     DipperError::Source {
         source_name: name.to_string(),
+        kind: crate::error::ErrorKind::from_text(&message),
         message,
     }
 }
@@ -525,6 +531,95 @@ impl Source for SqliteSource {
             to_table,
             to_columns,
         )
+    }
+
+    fn list_tables(
+        &self,
+        owner: &str,
+        name_like: &str,
+        limit: usize,
+    ) -> Result<crate::source::CatalogPage<crate::source::CatalogEntry>, DipperError> {
+        if !owner.eq_ignore_ascii_case("main") {
+            return Err(source_error(
+                self.name(),
+                format!("schema prefix {owner} is not allowed; only main is allowed"),
+            ));
+        }
+        let mut entries = Vec::new();
+        for kind in ["table", "view"] {
+            let rows = self.session.rows(
+                DictQuery::SqliteListObjects,
+                &[
+                    Value::Text(kind.to_string()),
+                    Value::Text(name_like.to_string()),
+                ],
+            )?;
+            for row in rows {
+                let Some(table) = cell_text(&row, 0) else {
+                    continue;
+                };
+                if table.starts_with("sqlite_") {
+                    continue;
+                }
+                let object_type = if kind == "view" { "VIEW" } else { "TABLE" };
+                entries.push(crate::source::CatalogEntry {
+                    owner: "main".to_string(),
+                    table,
+                    object_type: object_type.to_string(),
+                    comment: None,
+                    num_rows_estimate: None,
+                });
+            }
+        }
+        entries.sort_by(|left, right| left.table.cmp(&right.table));
+        Ok(crate::source::take_page(entries, limit))
+    }
+
+    fn find_columns(
+        &self,
+        column: &str,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::source::CatalogPage<crate::source::ColumnHit>, DipperError> {
+        if owner.is_some_and(|owner| !owner.eq_ignore_ascii_case("main")) {
+            return Err(source_error(
+                self.name(),
+                "schema prefix is not allowed; only main is allowed".to_string(),
+            ));
+        }
+        crate::sql::validate_column_ident(column)
+            .map_err(|message| source_error(self.name(), message))?;
+        let listed = self.list_tables("main", "%", usize::MAX)?;
+        let mut hits = Vec::new();
+        for entry in listed.items {
+            if entry.object_type != "TABLE" {
+                continue;
+            }
+            let rows = self.session.read_pragma(&entry.table)?;
+            for row in rows {
+                let Some(name) = cell_text(&row, 1) else {
+                    continue;
+                };
+                if !name.eq_ignore_ascii_case(column) {
+                    continue;
+                }
+                let data_type = cell_text(&row, 2).unwrap_or_else(|| "NONE".to_string());
+                let notnull =
+                    cell_i64(&row, 3).map_err(|message| source_error(self.name(), message))?;
+                let (data_length, data_precision, data_scale) = sqlite_type_numbers(&data_type);
+                hits.push(crate::source::ColumnHit {
+                    owner: "main".to_string(),
+                    table: entry.table.clone(),
+                    data_type,
+                    data_length,
+                    data_precision,
+                    data_scale,
+                    nullable: notnull.unwrap_or(0) == 0,
+                });
+            }
+        }
+        hits.sort_by(|left, right| left.table.cmp(&right.table));
+        Ok(crate::source::take_page(hits, limit))
     }
 }
 
