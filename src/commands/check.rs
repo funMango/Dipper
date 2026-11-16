@@ -46,7 +46,8 @@ pub fn run(
             }
         }
     };
-    let strict = strict || config.as_ref().is_some_and(|config| config.strict_readonly);
+    let cli_strict = strict;
+    let source_strict = cli_strict || config.as_ref().is_some_and(|config| config.strict_readonly);
     let sources = if blocks_all || env_only || config.is_none() {
         Vec::new()
     } else {
@@ -57,7 +58,7 @@ pub fn run(
                 .retain(|_, cfg| !matches!(cfg, SourceConfig::Oracle { .. }));
         }
         let opts = source::OpenOptions {
-            strict,
+            strict: source_strict,
             log: if log_sql {
                 source::SqlLogSink::Stderr
             } else {
@@ -73,7 +74,7 @@ pub fn run(
         .iter()
         .filter(|result| result.outcome.is_err())
         .count();
-    let exit_failed = failed || source_failed > 0 || (strict && warned);
+    let exit_failed = failed || source_failed > 0 || load_error.is_some() || (cli_strict && warned);
     if format == crate::cli::OutputFormat::Json {
         let secrets = config
             .as_ref()
@@ -89,23 +90,10 @@ pub fn run(
                 .iter()
                 .map(|result| source_row(result, &secrets))
                 .collect(),
-            error: if exit_failed {
-                Some(ErrorBody {
-                    code: if failed {
-                        "config".to_string()
-                    } else {
-                        "other".to_string()
-                    },
-                    retryable: false,
-                    message: if failed {
-                        "environment check failed".to_string()
-                    } else {
-                        format!(
-                            "check failed: {source_failed} of {} sources failed",
-                            sources.len()
-                        )
-                    },
-                })
+            error: if let Some(err) = load_error.as_ref() {
+                Some(ErrorBody::from_error(err))
+            } else if exit_failed {
+                Some(check_exit_error(failed, source_failed, sources.len()))
             } else {
                 None
             },
@@ -150,12 +138,41 @@ pub fn run(
         return Err(err);
     }
     if exit_failed {
+        if source_failed == 0 && !failed {
+            return Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
+                source_name: "check".to_string(),
+                message: "environment check has warnings and --strict is set".to_string(),
+            });
+        }
         Err(DipperError::CheckFailed {
             failed: source_failed.max(usize::from(failed)),
             total: if sources.is_empty() { 1 } else { sources.len() },
         })
     } else {
         Ok(())
+    }
+}
+
+fn check_exit_error(env_failed: bool, source_failed: usize, sources: usize) -> ErrorBody {
+    if env_failed {
+        ErrorBody {
+            code: "config".to_string(),
+            retryable: false,
+            message: "environment check failed".to_string(),
+        }
+    } else if source_failed > 0 {
+        ErrorBody {
+            code: "other".to_string(),
+            retryable: false,
+            message: format!("check failed: {source_failed} of {sources} sources failed"),
+        }
+    } else {
+        ErrorBody {
+            code: "other".to_string(),
+            retryable: false,
+            message: "environment check has warnings and --strict is set".to_string(),
+        }
     }
 }
 
@@ -195,7 +212,7 @@ fn executable_item() -> EnvItem {
             status: "warn".to_string(),
             detail: format!("dipper's folder is not on PATH ({shown})"),
             fix: Some(format!(
-                "Add the dipper folder to the user PATH. PowerShell: [Environment]::SetEnvironmentVariable(\"Path\", $env:Path + \";{shown}\", \"User\")"
+                "Add the dipper folder to the user PATH only. PowerShell: $userPath = [Environment]::GetEnvironmentVariable('Path','User'); if (-not $userPath) {{ $userPath = '{shown}' }} else {{ $userPath = $userPath + ';{shown}' }}; [Environment]::SetEnvironmentVariable('Path', $userPath, 'User')"
             )),
         }
     }
@@ -264,8 +281,23 @@ fn is_env_name(name: &str) -> bool {
     }
 }
 
+fn config_wants_oracle(raw: &str) -> bool {
+    let Ok(table) = toml::from_str::<toml::Table>(raw) else {
+        return false;
+    };
+    let Some(sources) = table.get("sources").and_then(toml::Value::as_table) else {
+        return false;
+    };
+    sources.values().any(|source| {
+        source
+            .get("kind")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|kind| kind == "oracle")
+    })
+}
+
 fn oracle_feature_item(raw: &str) -> EnvItem {
-    let wants_oracle = raw.contains("kind = \"oracle\"") || raw.contains("kind = 'oracle'");
+    let wants_oracle = config_wants_oracle(raw);
     let built = cfg!(feature = "oracle");
     if wants_oracle && !built {
         EnvItem {
@@ -289,7 +321,7 @@ fn oracle_feature_item(raw: &str) -> EnvItem {
 }
 
 fn instant_client_item(raw: &str) -> EnvItem {
-    let wants_oracle = raw.contains("kind = \"oracle\"") || raw.contains("kind = 'oracle'");
+    let wants_oracle = config_wants_oracle(raw);
     match source::probe_instant_client() {
         source::InstantClient::Loaded(version) => EnvItem {
             name: "instant_client",
@@ -320,7 +352,9 @@ fn source_row(result: &source::CheckResult, secrets: &[crate::output::KnownSecre
         Ok(()) => ("ok".to_string(), None, None),
         Err(reason) => {
             let hidden = crate::output::redact_known_values(reason, secrets);
-            let code = crate::error::ErrorKind::from_text(&hidden)
+            let code = result
+                .error_kind
+                .unwrap_or_else(|| crate::error::ErrorKind::from_text(reason))
                 .code()
                 .to_string();
             ("fail".to_string(), Some(code), Some(hidden))
@@ -386,4 +420,47 @@ fn write_line(out: &mut dyn Write, line: &str) -> Result<(), DipperError> {
         source_name: "stdout".to_string(),
         message: err.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oracle_kind_comes_from_parsed_toml_not_comments() {
+        assert!(config_wants_oracle(
+            "[sources.company]\nkind=\"oracle\"\nconnect = \"127.0.0.1:1/NOPE\"\n"
+        ));
+        assert!(config_wants_oracle("[sources.company]\nkind = 'oracle'\n"));
+        assert!(!config_wants_oracle(
+            "# kind = \"oracle\"\n[sources.sample]\nkind = \"sqlite\"\npath = \"sample.db\"\n"
+        ));
+        assert!(!config_wants_oracle(
+            "[sources.sample]\nkind = \"sqlite\"\n# the word oracle is only a comment\n"
+        ));
+        assert!(!config_wants_oracle("kind = [\n"));
+    }
+
+    #[test]
+    fn source_row_keeps_the_kind_after_the_message_is_withheld() {
+        let client = source::CheckResult {
+            name: "company".to_string(),
+            kind: "oracle",
+            outcome: Err("details withheld".to_string()),
+            error_kind: Some(crate::error::ErrorKind::ClientMissing),
+            findings: Vec::new(),
+        };
+        let row = source_row(&client, &[]);
+        assert_eq!(row.error_code.as_deref(), Some("client_missing"));
+
+        let missing = source::CheckResult {
+            name: "company".to_string(),
+            kind: "oracle",
+            outcome: Err("details withheld".to_string()),
+            error_kind: Some(crate::error::ErrorKind::ObjectNotFound),
+            findings: Vec::new(),
+        };
+        let row = source_row(&missing, &[]);
+        assert_eq!(row.error_code.as_deref(), Some("object_not_found"));
+    }
 }

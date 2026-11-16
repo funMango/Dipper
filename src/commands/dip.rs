@@ -633,11 +633,16 @@ fn outcome_entry(
         rows_loaded: outcome.rows,
         seconds: Some(outcome.elapsed.as_secs_f64()),
         warnings: outcome.warnings,
-        error: outcome
-            .result
-            .as_ref()
-            .err()
-            .map(|message| crate::output::ErrorBody::from_text(hide_text(message, secrets))),
+        error: outcome.result.as_ref().err().map(|message| {
+            let kind = outcome
+                .error_kind
+                .unwrap_or_else(|| crate::error::ErrorKind::from_text(message));
+            crate::output::ErrorBody {
+                code: kind.code().to_string(),
+                retryable: kind.retryable(),
+                message: hide_text(message, secrets),
+            }
+        }),
     }
 }
 

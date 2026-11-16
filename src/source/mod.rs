@@ -291,6 +291,8 @@ pub struct CheckResult {
     pub name: String,
     pub kind: &'static str,
     pub outcome: Result<(), String>,
+    /// Kind from the source error, captured before the message is redacted.
+    pub error_kind: Option<crate::error::ErrorKind>,
     pub findings: Vec<Finding>,
 }
 
@@ -373,12 +375,20 @@ pub fn check_all(config: &Config, opts: &OpenOptions) -> Vec<CheckResult> {
         .map(|(name, cfg)| match open(name, cfg, opts) {
             Ok(opened) => {
                 let mut findings = opened.findings;
-                let mut outcome = opened.source.test_connection().map_err(failure_reason);
+                let mut error_kind = None;
+                let mut outcome = match opened.source.test_connection() {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        error_kind = Some(err.kind());
+                        Err(failure_reason(err))
+                    }
+                };
                 if outcome.is_ok() {
                     for dip in config.dips.iter().filter(|dip| &dip.source == name) {
                         match opened.source.preflight(&dip.name, &spec_for(config, dip)) {
                             Ok(report) => findings.extend(report.findings),
                             Err(err) => {
+                                error_kind = Some(err.kind());
                                 outcome = Err(failure_reason(err));
                                 break;
                             }
@@ -387,20 +397,28 @@ pub fn check_all(config: &Config, opts: &OpenOptions) -> Vec<CheckResult> {
                 }
                 if outcome.is_ok() {
                     outcome = summarize(&findings, opts.strict);
+                    if outcome.is_err() {
+                        error_kind = Some(crate::error::ErrorKind::Other);
+                    }
                 }
                 CheckResult {
                     name: name.clone(),
                     kind: opened.source.kind(),
                     outcome,
+                    error_kind,
                     findings,
                 }
             }
-            Err(err) => CheckResult {
-                name: name.clone(),
-                kind: kind_of(cfg),
-                outcome: Err(failure_reason(err)),
-                findings: Vec::new(),
-            },
+            Err(err) => {
+                let error_kind = Some(err.kind());
+                CheckResult {
+                    name: name.clone(),
+                    kind: kind_of(cfg),
+                    outcome: Err(failure_reason(err)),
+                    error_kind,
+                    findings: Vec::new(),
+                }
+            }
         })
         .collect()
 }

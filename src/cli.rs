@@ -77,8 +77,8 @@ pub enum OntologyCommand {
         /// `LIKE` pattern. Default `%`.
         #[arg(long, default_value = "%")]
         name_like: String,
-        /// Maximum rows. Default 200, maximum 2000.
-        #[arg(long)]
+        /// Maximum rows. Default 200. Values outside 1..=2000 are a usage error.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=2000))]
         limit: Option<u64>,
         /// stdout format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
@@ -94,8 +94,8 @@ pub enum OntologyCommand {
         /// Restrict the search to this owner.
         #[arg(long)]
         owner: Option<String>,
-        /// Maximum rows. Default 200, maximum 2000.
-        #[arg(long)]
+        /// Maximum rows. Default 200. Values outside 1..=2000 are a usage error.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=2000))]
         limit: Option<u64>,
         /// stdout format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]

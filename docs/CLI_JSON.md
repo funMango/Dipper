@@ -2,7 +2,7 @@
 
 `dipper dip`, `dipper check`, `dipper ontology pull`, `dipper ontology list`, `dipper ontology find`, and `dipper ontology check-relation` accept `--format json`. Omitting `--format` keeps the existing table or path list. The flag is not global: `render` and `validate` do not take it.
 
-`--format json` writes one JSON document to stdout and a final newline. Progress, `preview:`, `note:`, `ignored filter:`, `nothing to fetch:`, `--log-sql`, and `dipper:` stay on stderr. A clap usage error (exit 2), including an unknown format such as `--format xml`, writes no JSON.
+`--format json` writes one JSON document to stdout and a final newline. Progress, `preview:`, `note:`, `ignored filter:`, `nothing to fetch:`, `--log-sql`, and `dipper:` stay on stderr. A clap usage error (exit 2), including an unknown format such as `--format xml` or `ontology list`/`find` `--limit` outside 1..=2000, writes no JSON. `error.code` and `error_code` are the kind captured before the message is redacted, so a withheld message stays `client_missing` or `object_not_found` instead of becoming `other`.
 
 `schema_version` is the integer `1`. New fields may be added without changing it. Renaming, removing, or changing the meaning of a field bumps the version.
 

@@ -81,6 +81,7 @@ pub(crate) enum DictQuery {
     ListTabComments,
     ListTableStats,
     FindColumns,
+    FindColumnsByOwner,
     SqliteMaster,
     SqliteListObjects,
 }
@@ -143,7 +144,7 @@ impl DictQuery {
                 r#"SELECT "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME" FROM "ALL_IND_COLUMNS" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2"#
             }
             DictQuery::ListObjects => {
-                r#"SELECT "OBJECT_NAME", "OBJECT_TYPE" FROM "ALL_OBJECTS" WHERE "OWNER" = :1 AND "OBJECT_TYPE" = :2 AND "OBJECT_NAME" LIKE :3"#
+                r#"SELECT "OBJECT_NAME", "OBJECT_TYPE" FROM "ALL_OBJECTS" WHERE "OWNER" = :1 AND "OBJECT_TYPE" = :2 AND "OBJECT_NAME" LIKE :3 FETCH FIRST :4 ROWS ONLY"#
             }
             DictQuery::ListTabComments => {
                 r#"SELECT "TABLE_NAME", "COMMENTS" FROM "ALL_TAB_COMMENTS" WHERE "OWNER" = :1"#
@@ -152,7 +153,10 @@ impl DictQuery {
                 r#"SELECT "TABLE_NAME", "NUM_ROWS" FROM "ALL_TABLES" WHERE "OWNER" = :1"#
             }
             DictQuery::FindColumns => {
-                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1"#
+                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1 FETCH FIRST :2 ROWS ONLY"#
+            }
+            DictQuery::FindColumnsByOwner => {
+                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1 AND "OWNER" = :2 FETCH FIRST :3 ROWS ONLY"#
             }
             DictQuery::SqliteMaster => {
                 r#"SELECT "type", "sql" FROM "sqlite_master" WHERE "name" = ?"#
@@ -1190,6 +1194,7 @@ mod tests {
             DictQuery::ListTabComments,
             DictQuery::ListTableStats,
             DictQuery::FindColumns,
+            DictQuery::FindColumnsByOwner,
             DictQuery::SqliteMaster,
             DictQuery::SqliteListObjects,
         ] {
@@ -1358,6 +1363,7 @@ mod tests {
             DictQuery::ListTabComments,
             DictQuery::ListTableStats,
             DictQuery::FindColumns,
+            DictQuery::FindColumnsByOwner,
         ];
         for query in queries {
             let sql = query.sql();
@@ -1400,15 +1406,66 @@ mod tests {
             DictQuery::ListTabComments,
             DictQuery::ListTableStats,
             DictQuery::FindColumns,
+            DictQuery::FindColumnsByOwner,
         ] {
             let sql = query.sql();
             assert!(!sql.contains('\''), "{sql}");
             assert!(!sql.to_ascii_uppercase().contains(" JOIN "), "{sql}");
             assert!(!sql.to_ascii_uppercase().contains(" ORDER BY "), "{sql}");
-            assert!(!sql.to_ascii_uppercase().contains("FETCH"), "{sql}");
+            let upper = sql.to_ascii_uppercase();
+            if upper.contains("FETCH") {
+                assert!(upper.contains("FETCH FIRST") && sql.contains(':'), "{sql}");
+            }
             let parsed = parse_dict(query).unwrap_or_else(|err| panic!("{query:?}: {err}"));
             assert_eq!(parsed.sql(), sql);
             assert_eq!(parsed.dialect(), SqlDialect::Oracle);
+        }
+        #[cfg(feature = "oracle")]
+        {
+            let page = crate::source::oracle::find_columns_from(
+                &OwnerRows,
+                "company",
+                "order_id",
+                Some("APPUSER"),
+                2,
+            )
+            .unwrap();
+            assert_eq!(page.items.len(), 1, "owner filter dropped the other schema");
+            assert_eq!(page.items[0].owner, "APPUSER");
+            assert_eq!(page.items[0].table, "KEEP");
+        }
+    }
+
+    #[cfg(feature = "oracle")]
+    struct OwnerRows;
+
+    #[cfg(feature = "oracle")]
+    impl Dictionary for OwnerRows {
+        fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError> {
+            assert_eq!(query, DictQuery::FindColumnsByOwner);
+            assert_eq!(binds[0], Value::Text("ORDER_ID".into()));
+            assert_eq!(binds[1], Value::Text("APPUSER".into()));
+            assert_eq!(binds[2], Value::Int(3));
+            Ok(vec![
+                vec![
+                    Value::Text("OTHER".into()),
+                    Value::Text("DROP".into()),
+                    Value::Text("NUMBER".into()),
+                    Value::Int(22),
+                    Value::Int(10),
+                    Value::Int(0),
+                    Value::Text("Y".into()),
+                ],
+                vec![
+                    Value::Text("APPUSER".into()),
+                    Value::Text("KEEP".into()),
+                    Value::Text("NUMBER".into()),
+                    Value::Int(22),
+                    Value::Int(10),
+                    Value::Int(0),
+                    Value::Text("Y".into()),
+                ],
+            ])
         }
     }
 

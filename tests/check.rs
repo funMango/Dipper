@@ -253,6 +253,23 @@ password_note = "${DIPPER_TEST_MISSING}"
     assert!(!stdout.contains("SHOULD_NOT_PRINT"), "{stdout}");
     assert!(!stderr.contains("SHOULD_NOT_PRINT"), "{stderr}");
     assert!(!missing.exists());
+
+    let db = common::make_sqlite(dir.path(), "sample.db", &["ORDERS"]);
+    let before = common::sha256_file(&db);
+    let valid = sqlite_sources(dir.path(), &[("sample", "sample.db")]);
+    let output = common::dipper()
+        .args(["--log-sql", "check", "--env-only", "--config"])
+        .arg(&valid)
+        .args(["--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = output_text(&output);
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(doc["sources"].as_array().unwrap().is_empty(), "{stdout}");
+    assert!(!stderr.contains("sql:"), "{stderr}");
+    assert_eq!(common::sha256_file(&db), before);
 }
 
 #[test]
@@ -462,6 +479,182 @@ columns = ["ORDER_ID"]
     let (stdout, stderr) = output_text(&output);
     assert!(stdout.contains("  refused: orders:"), "{stdout}");
     assert!(stderr.contains("check failed"), "{stderr}");
+}
+
+#[test]
+fn check_json_reports_a_toml_parse_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        "[sources.s]\nkind = \"sqlite\"\npath = \"src.db\"\nunknown_key = [\n",
+    );
+    let output = common::dipper()
+        .args(["check", "--config"])
+        .arg(&config)
+        .args(["--format", "json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, _) = output_text(&output);
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["exit_code"], 1);
+    assert_eq!(doc["error"]["code"], "config");
+    assert!(doc["sources"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn strict_readonly_does_not_fail_a_healthy_source_for_a_path_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    common::make_sqlite(dir.path(), "sample.db", &["ORDERS"]);
+    let config = common::write_config(
+        dir.path(),
+        r#"
+[safety]
+strict_readonly = true
+
+[sources.sample]
+kind = "sqlite"
+path = "sample.db"
+"#,
+    );
+    let output = common::dipper()
+        .env("PATH", "")
+        .args(["check", "--config"])
+        .arg(&config)
+        .args(["--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = output_text(&output);
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(doc["ok"], true);
+    assert_eq!(doc["exit_code"], 0);
+    assert!(doc["error"].is_null());
+    assert_eq!(doc["sources"][0]["status"], "ok");
+    let executable = doc["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "executable")
+        .unwrap();
+    assert_eq!(executable["status"], "warn");
+
+    let strict = common::dipper()
+        .env("PATH", "")
+        .args(["--strict", "check", "--config"])
+        .arg(&config)
+        .args(["--format", "json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = output_text(&strict);
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["exit_code"], 1);
+    assert_eq!(doc["sources"][0]["status"], "ok");
+    assert!(
+        !stdout.contains("0 of 1 sources failed"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--strict") || stdout.contains("--strict"),
+        "{stdout}\n{stderr}"
+    );
+}
+
+#[test]
+fn oracle_kind_without_spaces_is_detected_and_a_comment_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    common::make_sqlite(dir.path(), "sample.db", &["ORDERS"]);
+    let nospace = common::write_config(
+        dir.path(),
+        r#"
+[sources.company]
+kind="oracle"
+connect="127.0.0.1:1/NOPE"
+user="APPUSER"
+password="${DIPPER_TEST_ORA_PASSWORD}"
+"#,
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .env("DIPPER_TEST_ORA_PASSWORD", "not-a-real-secret")
+        .args(["--config"])
+        .arg(&nospace)
+        .args(["check", "--env-only", "--format", "json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let (stdout, _) = output_text(&output);
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let oracle = env_item(&doc, "oracle_feature");
+    let client = env_item(&doc, "instant_client");
+    if cfg!(feature = "oracle") {
+        assert_eq!(oracle["status"], "ok");
+        assert_eq!(client["status"], "fail");
+    } else {
+        assert_eq!(oracle["status"], "fail");
+    }
+    assert!(!stdout.contains("not-a-real-secret"), "{stdout}");
+
+    let comment = common::write_config(
+        dir.path(),
+        "# kind = \"oracle\"\n[sources.sample]\nkind = \"sqlite\"\npath = \"sample.db\"\n",
+    );
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&comment)
+        .args(["check", "--env-only", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, _) = output_text(&output);
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let oracle = env_item(&doc, "oracle_feature");
+    assert_eq!(oracle["status"], "ok");
+    if !cfg!(feature = "oracle") {
+        assert_eq!(oracle["detail"], "no Oracle source is configured");
+    }
+    let client = env_item(&doc, "instant_client");
+    assert_ne!(client["status"], "fail");
+}
+
+fn env_item<'a>(doc: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    doc["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == name)
+        .unwrap_or_else(|| panic!("missing {name} in {doc}"))
+}
+
+#[test]
+fn check_env_only_opens_no_source_when_config_is_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = common::make_sqlite(dir.path(), "sample.db", &["ORDERS"]);
+    let before = common::sha256_file(&db);
+    let config = sqlite_sources(dir.path(), &[("sample", "sample.db")]);
+    let output = common::dipper()
+        .args(["--log-sql", "check", "--env-only", "--config"])
+        .arg(&config)
+        .args(["--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let (stdout, stderr) = output_text(&output);
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(doc["ok"], true);
+    assert!(doc["sources"].as_array().unwrap().is_empty());
+    assert!(!stderr.contains("sql:"), "{stderr}");
+    assert_eq!(common::sha256_file(&db), before);
 }
 
 #[test]

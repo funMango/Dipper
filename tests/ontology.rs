@@ -86,6 +86,111 @@ fn list_returns_tables_views_and_honors_name_like_and_limit() {
     let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(doc["truncated"], true);
     assert_eq!(doc["tables"].as_array().unwrap().len(), 2);
+    let names: Vec<&str> = doc["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["table"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["NODE_A", "NODE_B"]);
+
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "list",
+            "sample",
+            "--name-like",
+            "OTHER%",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let names: Vec<&str> = doc["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["table"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["OTHER"]);
+    assert_eq!(doc["truncated"], false);
+
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology",
+            "list",
+            "sample",
+            "--name-like",
+            "NODE%",
+            "--limit",
+            "3",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(doc["tables"].as_array().unwrap().len(), 3);
+
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology", "list", "sample", "--limit", "4", "--format", "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(doc["tables"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn limit_outside_1_to_2000_is_a_usage_error() {
+    let cases: &[&[&str]] = &[
+        &[
+            "ontology", "list", "sample", "--limit", "0", "--format", "json",
+        ],
+        &[
+            "ontology", "list", "sample", "--limit", "2001", "--format", "json",
+        ],
+        &[
+            "ontology", "find", "sample", "--column", "ID", "--limit", "0", "--format", "json",
+        ],
+        &[
+            "ontology", "find", "sample", "--column", "ID", "--limit", "2001", "--format", "json",
+        ],
+    ];
+    for args in cases {
+        let output = common::dipper()
+            .args(*args)
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stdout.trim().is_empty(),
+            "usage error must not write JSON: {stdout}"
+        );
+        assert!(stderr.to_ascii_lowercase().contains("limit"), "{stderr}");
+    }
 }
 
 #[test]
@@ -850,7 +955,70 @@ password = "${DIPPER_PR3B_PASSWORD}"
             assert_eq!(doc["command"], "ontology.check_relation");
             let message = doc["error"]["message"].as_str().unwrap();
             assert!(!message.contains("1047"), "{message}");
+            assert_eq!(doc["error"]["code"], "client_missing");
         }
+    }
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .env("DIPPER_PR3B_PASSWORD", "1047")
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "ontology", "list", "company", "--owner", "APPUSER", "--format", "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let combined = format!("{stdout}{stderr}");
+    assert!(!combined.contains("1047"), "{combined}");
+    assert!(!combined.contains("reader"), "{combined}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["error"]["code"], "client_missing");
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+fn list_and_find_redact_oracle_errors_and_keep_client_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1521/NOPE"
+user = "reader"
+password = "${DIPPER_PR3B_PASSWORD}"
+"#,
+    );
+    for args in [
+        vec!["ontology", "list", "company", "--owner", "APPUSER"],
+        vec![
+            "ontology", "find", "company", "--column", "ORDER_ID", "--owner", "APPUSER",
+        ],
+    ] {
+        let output = common::dipper()
+            .current_dir(dir.path())
+            .env("DIPPER_PR3B_PASSWORD", "1047")
+            .args(["--config"])
+            .arg(&config)
+            .args(&args)
+            .args(["--format", "json"])
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let combined = format!("{stdout}{stderr}");
+        assert!(!combined.contains("1047"), "{combined}");
+        assert!(!combined.contains("reader"), "{combined}");
+        assert!(!combined.contains("127.0.0.1:1521/NOPE"), "{combined}");
+        let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["error"]["code"], "client_missing");
     }
 }
 

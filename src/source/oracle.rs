@@ -618,65 +618,7 @@ impl Source for OracleSource {
         name_like: &str,
         limit: usize,
     ) -> Result<crate::source::CatalogPage<crate::source::CatalogEntry>, DipperError> {
-        crate::sql::validate_ident(owner).map_err(|message| message_error(self.name(), message))?;
-        let owner_bind = Value::Text(owner.to_string());
-        let pattern = Value::Text(name_like.to_string());
-        let mut entries = Vec::new();
-        for kind in ["TABLE", "VIEW"] {
-            let rows = self.session.rows(
-                DictQuery::ListObjects,
-                &[
-                    owner_bind.clone(),
-                    Value::Text(kind.to_string()),
-                    pattern.clone(),
-                ],
-            )?;
-            for row in rows {
-                let Some(table) = cell_text(&row, 0) else {
-                    continue;
-                };
-                let object_type = cell_text(&row, 1).unwrap_or_else(|| kind.to_string());
-                if object_type != "TABLE" && object_type != "VIEW" {
-                    continue;
-                }
-                entries.push(crate::source::CatalogEntry {
-                    owner: owner.to_string(),
-                    table,
-                    object_type,
-                    comment: None,
-                    num_rows_estimate: None,
-                });
-            }
-        }
-        let comments = self.session.rows(
-            DictQuery::ListTabComments,
-            std::slice::from_ref(&owner_bind),
-        )?;
-        let mut comment_of = std::collections::BTreeMap::new();
-        for row in comments {
-            if let Some(table) = cell_text(&row, 0) {
-                comment_of.insert(table, cell_text(&row, 1));
-            }
-        }
-        let stats = self
-            .session
-            .rows(DictQuery::ListTableStats, std::slice::from_ref(&owner_bind))?;
-        let mut rows_of = std::collections::BTreeMap::new();
-        for row in stats {
-            if let Some(table) = cell_text(&row, 0) {
-                rows_of.insert(table, cell_i64(&row, 1).ok().flatten());
-            }
-        }
-        for entry in &mut entries {
-            entry.comment = comment_of.get(&entry.table).cloned().flatten();
-            entry.num_rows_estimate = rows_of.get(&entry.table).copied().flatten();
-        }
-        entries.sort_by(|left, right| {
-            left.table
-                .cmp(&right.table)
-                .then(left.owner.cmp(&right.owner))
-        });
-        Ok(crate::source::take_page(entries, limit))
+        list_tables_from(&self.session, self.name(), owner, name_like, limit)
     }
 
     fn find_columns(
@@ -685,16 +627,111 @@ impl Source for OracleSource {
         owner: Option<&str>,
         limit: usize,
     ) -> Result<crate::source::CatalogPage<crate::source::ColumnHit>, DipperError> {
-        let column = column.to_ascii_uppercase();
-        crate::sql::validate_column_ident(&column)
-            .map_err(|message| message_error(self.name(), message))?;
-        if let Some(owner) = owner {
-            crate::sql::validate_ident(owner)
-                .map_err(|message| message_error(self.name(), message))?;
+        find_columns_from(&self.session, self.name(), column, owner, limit)
+    }
+}
+
+fn page_cap(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX).saturating_add(1)
+}
+
+fn list_tables_from(
+    dict: &dyn Dictionary,
+    name: &str,
+    owner: &str,
+    name_like: &str,
+    limit: usize,
+) -> Result<crate::source::CatalogPage<crate::source::CatalogEntry>, DipperError> {
+    crate::sql::validate_ident(owner).map_err(|message| message_error(name, message))?;
+    let owner_bind = Value::Text(owner.to_string());
+    let pattern = Value::Text(name_like.to_string());
+    let cap = Value::Int(page_cap(limit));
+    let mut entries = Vec::new();
+    for kind in ["TABLE", "VIEW"] {
+        let rows = dict.rows(
+            DictQuery::ListObjects,
+            &[
+                owner_bind.clone(),
+                Value::Text(kind.to_string()),
+                pattern.clone(),
+                cap.clone(),
+            ],
+        )?;
+        for row in rows {
+            let Some(table) = cell_text(&row, 0) else {
+                continue;
+            };
+            let object_type = cell_text(&row, 1).unwrap_or_else(|| kind.to_string());
+            if object_type != "TABLE" && object_type != "VIEW" {
+                continue;
+            }
+            entries.push(crate::source::CatalogEntry {
+                owner: owner.to_string(),
+                table,
+                object_type,
+                comment: None,
+                num_rows_estimate: None,
+            });
+            if entries.len() > limit {
+                break;
+            }
         }
-        let rows = self
-            .session
-            .rows(DictQuery::FindColumns, &[Value::Text(column)])?;
+    }
+    let comments = dict.rows(
+        DictQuery::ListTabComments,
+        std::slice::from_ref(&owner_bind),
+    )?;
+    let mut comment_of = std::collections::BTreeMap::new();
+    for row in comments {
+        if let Some(table) = cell_text(&row, 0) {
+            comment_of.insert(table, cell_text(&row, 1));
+        }
+    }
+    let stats = dict.rows(DictQuery::ListTableStats, std::slice::from_ref(&owner_bind))?;
+    let mut rows_of = std::collections::BTreeMap::new();
+    for row in stats {
+        if let Some(table) = cell_text(&row, 0) {
+            rows_of.insert(table, cell_i64(&row, 1).ok().flatten());
+        }
+    }
+    for entry in &mut entries {
+        entry.comment = comment_of.get(&entry.table).cloned().flatten();
+        entry.num_rows_estimate = rows_of.get(&entry.table).copied().flatten();
+    }
+    entries.sort_by(|left, right| {
+        left.table
+            .cmp(&right.table)
+            .then(left.owner.cmp(&right.owner))
+    });
+    Ok(crate::source::take_page(entries, limit))
+}
+
+pub(crate) fn find_columns_from(
+    dict: &dyn Dictionary,
+    name: &str,
+    column: &str,
+    owner: Option<&str>,
+    limit: usize,
+) -> Result<crate::source::CatalogPage<crate::source::ColumnHit>, DipperError> {
+    let column = column.to_ascii_uppercase();
+    crate::sql::validate_column_ident(&column).map_err(|message| message_error(name, message))?;
+    if let Some(owner) = owner {
+        crate::sql::validate_ident(owner).map_err(|message| message_error(name, message))?;
+    }
+    let cap = Value::Int(page_cap(limit));
+    let (query, binds) = match owner {
+        Some(owner) => (
+            DictQuery::FindColumnsByOwner,
+            vec![Value::Text(column), Value::Text(owner.to_string()), cap],
+        ),
+        None => (DictQuery::FindColumns, vec![Value::Text(column), cap]),
+    };
+    let rows = dict.rows(query, &binds)?;
+    fn collect(
+        rows: Vec<Vec<Value>>,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Vec<crate::source::ColumnHit> {
         let mut hits = Vec::new();
         for row in rows {
             let Some(hit_owner) = cell_text(&row, 0) else {
@@ -715,14 +752,19 @@ impl Source for OracleSource {
                 data_scale: cell_i64(&row, 5).ok().flatten(),
                 nullable: cell_text(&row, 6).as_deref() == Some("Y"),
             });
+            if hits.len() > limit {
+                break;
+            }
         }
-        hits.sort_by(|left, right| {
-            left.owner
-                .cmp(&right.owner)
-                .then(left.table.cmp(&right.table))
-        });
-        Ok(crate::source::take_page(hits, limit))
+        hits
     }
+    let mut hits = collect(rows, owner, limit);
+    hits.sort_by(|left, right| {
+        left.owner
+            .cmp(&right.owner)
+            .then(left.table.cmp(&right.table))
+    });
+    Ok(crate::source::take_page(hits, limit))
 }
 
 fn non_null_count(
@@ -941,8 +983,9 @@ fn message_error(name: &str, message: impl Into<String>) -> DipperError {
 }
 
 fn oracle_error(name: &str, err: &oracle::Error, secret: Option<&Secret>) -> DipperError {
-    let text = crate::source::redact_driver_message(&err.to_string(), secret.map(Secret::expose));
-    let message = if text.contains("DPI-1047") {
+    let raw = err.to_string();
+    let text = crate::source::redact_driver_message(&raw, secret.map(Secret::expose));
+    let message = if raw.contains("DPI-1047") {
         format!("{text}; Oracle Instant Client not found; see docs/ORACLE_SETUP.md")
     } else {
         text
@@ -958,6 +1001,99 @@ fn oracle_error(name: &str, err: &oracle::Error, secret: Option<&Secret>) -> Dip
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use std::sync::Mutex;
+
+    struct RecordingDict {
+        calls: Mutex<Vec<(DictQuery, Vec<Value>)>>,
+    }
+
+    impl Dictionary for RecordingDict {
+        fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError> {
+            self.calls.lock().unwrap().push((query, binds.to_vec()));
+            match query {
+                DictQuery::ListObjects => {
+                    if binds.get(1) == Some(&Value::Text("TABLE".into())) {
+                        Ok(vec![vec![
+                            Value::Text("ORDERS".into()),
+                            Value::Text("TABLE".into()),
+                        ]])
+                    } else {
+                        Ok(vec![])
+                    }
+                }
+                DictQuery::FindColumns | DictQuery::FindColumnsByOwner => {
+                    Ok(vec![column_row("OTHER", "T1"), column_row("APPUSER", "T2")])
+                }
+                _ => Ok(vec![]),
+            }
+        }
+    }
+
+    fn column_row(owner: &str, table: &str) -> Vec<Value> {
+        vec![
+            Value::Text(owner.into()),
+            Value::Text(table.into()),
+            Value::Text("NUMBER".into()),
+            Value::Int(22),
+            Value::Int(10),
+            Value::Int(0),
+            Value::Text("Y".into()),
+        ]
+    }
+
+    #[test]
+    fn oracle_list_and_find_bind_the_owner_and_stop_at_limit_plus_one() {
+        let dict = RecordingDict {
+            calls: Mutex::new(Vec::new()),
+        };
+        let page = list_tables_from(&dict, "company", "APPUSER", "ORD%", 2).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].owner, "APPUSER");
+        assert!(!page.truncated);
+        let calls = dict.calls.lock().unwrap();
+        let objects = calls
+            .iter()
+            .find(|(query, _)| *query == DictQuery::ListObjects)
+            .unwrap();
+        assert_eq!(objects.1[0], Value::Text("APPUSER".into()));
+        assert_eq!(objects.1[1], Value::Text("TABLE".into()));
+        assert_eq!(objects.1[2], Value::Text("ORD%".into()));
+        assert_eq!(objects.1[3], Value::Int(3));
+        assert!(DictQuery::ListObjects.sql().contains("\"OWNER\" = :1"));
+        assert!(DictQuery::ListObjects
+            .sql()
+            .contains("FETCH FIRST :4 ROWS ONLY"));
+        let comments = calls
+            .iter()
+            .find(|(query, _)| *query == DictQuery::ListTabComments)
+            .unwrap();
+        assert_eq!(comments.1, vec![Value::Text("APPUSER".into())]);
+        drop(calls);
+
+        let dict = RecordingDict {
+            calls: Mutex::new(Vec::new()),
+        };
+        let found = find_columns_from(&dict, "company", "order_id", Some("appuser"), 2).unwrap();
+        assert_eq!(found.items.len(), 1);
+        assert_eq!(found.items[0].owner, "APPUSER");
+        assert_eq!(found.items[0].table, "T2");
+        assert!(!found.truncated);
+        let calls = dict.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, DictQuery::FindColumnsByOwner);
+        assert_eq!(
+            calls[0].1,
+            vec![
+                Value::Text("ORDER_ID".into()),
+                Value::Text("appuser".into()),
+                Value::Int(3),
+            ]
+        );
+        let sql = DictQuery::FindColumnsByOwner.sql();
+        assert!(sql.contains("\"COLUMN_NAME\" = :1"));
+        assert!(sql.contains("\"OWNER\" = :2"));
+        assert!(sql.contains("FETCH FIRST :3 ROWS ONLY"));
+    }
 
     #[test]
     fn count_accepts_text_whole_floats_and_ints() {

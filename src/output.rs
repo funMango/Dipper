@@ -402,16 +402,16 @@ mod tests {
         let err = DipperError::Source {
             source_name: "company".to_string(),
             kind: ErrorKind::ObjectNotFound,
-            message: "object not found: crsrd.T".to_string(),
+            message: "object not found: appuser.T".to_string(),
         };
-        let hidden = redact_error(err, &[user("CRSRD")]);
+        let hidden = redact_error(err, &[user("APPUSER")]);
         assert_eq!(hidden.kind(), ErrorKind::ObjectNotFound);
         assert!(!hidden.retryable());
         assert_eq!(hidden.error_message(), SECRET_WITHHELD);
         assert!(!hidden
             .error_message()
             .to_ascii_lowercase()
-            .contains("crsrd"));
+            .contains("appuser"));
         let body = super::ErrorBody::from_error(&hidden);
         assert_eq!(body.code, "object_not_found");
         assert!(!body.retryable);
