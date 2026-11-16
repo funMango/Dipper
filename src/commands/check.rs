@@ -35,13 +35,18 @@ pub fn run(
         (item.name == "oracle_feature" || item.name == "instant_client") && item.status == "fail"
     });
     let mut load_error = None;
-    let mut config = if env_only || !config_path.is_file() {
+    // A valid file is loaded even for `--env-only`. That flag is what skips
+    // connections. A broken file fails the command except under `--env-only`,
+    // which reports the environment section and does not connect.
+    let mut config = if !config_path.is_file() {
         None
     } else {
         match config::load(config_path) {
             Ok(config) => Some(config),
             Err(err) => {
-                load_error = Some(err);
+                if !env_only {
+                    load_error = Some(err);
+                }
                 None
             }
         }
