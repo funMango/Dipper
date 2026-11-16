@@ -189,7 +189,10 @@ fn limit_outside_1_to_2000_is_a_usage_error() {
             stdout.trim().is_empty(),
             "usage error must not write JSON: {stdout}"
         );
-        assert!(stderr.to_ascii_lowercase().contains("limit"), "{stderr}");
+        assert!(
+            stderr.contains("1..=2000"),
+            "clap must reject the limit before the command runs: {stderr}"
+        );
     }
 }
 
