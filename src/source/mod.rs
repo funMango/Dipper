@@ -17,6 +17,34 @@ pub use preflight::{Finding, KeySource, Level, PreflightReport, ResolvedKey};
 pub use session::SessionStatement;
 pub use sqlite::SqliteSource;
 
+/// Result of loading Oracle Instant Client without opening a database.
+pub enum InstantClient {
+    Loaded(String),
+    Unavailable(String),
+    NotBuilt,
+}
+
+pub fn probe_instant_client() -> InstantClient {
+    #[cfg(feature = "oracle")]
+    {
+        match oracle::load_instant_client() {
+            Ok(version) => InstantClient::Loaded(version),
+            Err(text) => {
+                let code = if text.contains("DPI-1047") {
+                    "DPI-1047"
+                } else {
+                    "client load failed"
+                };
+                InstantClient::Unavailable(code.to_string())
+            }
+        }
+    }
+    #[cfg(not(feature = "oracle"))]
+    {
+        InstantClient::NotBuilt
+    }
+}
+
 /// How a dip walks the source table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Paging {

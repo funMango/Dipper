@@ -290,44 +290,28 @@ fn oracle_feature_item(raw: &str) -> EnvItem {
 
 fn instant_client_item(raw: &str) -> EnvItem {
     let wants_oracle = raw.contains("kind = \"oracle\"") || raw.contains("kind = 'oracle'");
-    #[cfg(feature = "oracle")]
-    {
-        match oracle::Version::client() {
-            Ok(version) => EnvItem {
-                name: "instant_client",
-                status: "ok".to_string(),
-                detail: format!("Oracle client {version}"),
-                fix: None,
-            },
-            Err(err) => {
-                let text = err.to_string();
-                let code = if text.contains("DPI-1047") {
-                    "DPI-1047"
-                } else {
-                    "client load failed"
-                };
-                EnvItem {
-                    name: "instant_client",
-                    status: if wants_oracle { "fail" } else { "warn" }.to_string(),
-                    detail: format!("Oracle Instant Client could not be loaded ({code})"),
-                    fix: Some(
-                        "Install Oracle Instant Client Basic or Light, add its folder to PATH, and see docs/ORACLE_SETUP.md"
-                            .to_string(),
-                    ),
-                }
-            }
-        }
-    }
-    #[cfg(not(feature = "oracle"))]
-    {
-        let _ = wants_oracle;
-        EnvItem {
+    match source::probe_instant_client() {
+        source::InstantClient::Loaded(version) => EnvItem {
+            name: "instant_client",
+            status: "ok".to_string(),
+            detail: format!("Oracle client {version}"),
+            fix: None,
+        },
+        source::InstantClient::Unavailable(code) => EnvItem {
+            name: "instant_client",
+            status: if wants_oracle { "fail" } else { "warn" }.to_string(),
+            detail: format!("Oracle Instant Client could not be loaded ({code})"),
+            fix: Some(
+                "Install Oracle Instant Client Basic or Light, add its folder to PATH, and see docs/ORACLE_SETUP.md"
+                    .to_string(),
+            ),
+        },
+        source::InstantClient::NotBuilt => EnvItem {
             name: "instant_client",
             status: "skipped".to_string(),
-            detail: "Instant Client is not loaded in a build without the oracle feature"
-                .to_string(),
+            detail: "Instant Client is not loaded in a build without the oracle feature".to_string(),
             fix: None,
-        }
+        },
     }
 }
 

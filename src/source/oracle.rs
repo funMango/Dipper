@@ -16,6 +16,13 @@ use crate::source::{
 use crate::sql::build;
 use crate::sql::guard::{GuardedSelect, GuardedSql, SqlDialect};
 
+pub(crate) fn load_instant_client() -> Result<String, String> {
+    match oracle::Version::client() {
+        Ok(version) => Ok(version.to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 pub(crate) struct OracleSource {
     session: Session<LoggingExecutor<OracleExec>>,
 }
