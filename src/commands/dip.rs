@@ -633,11 +633,16 @@ fn outcome_entry(
         rows_loaded: outcome.rows,
         seconds: Some(outcome.elapsed.as_secs_f64()),
         warnings: outcome.warnings,
-        error: outcome
-            .result
-            .as_ref()
-            .err()
-            .map(|message| hide_text(message, secrets)),
+        error: outcome.result.as_ref().err().map(|message| {
+            let kind = outcome
+                .error_kind
+                .unwrap_or_else(|| crate::error::ErrorKind::from_text(message));
+            crate::output::ErrorBody {
+                code: kind.code().to_string(),
+                retryable: kind.retryable(),
+                message: hide_text(message, secrets),
+            }
+        }),
     }
 }
 
@@ -1014,6 +1019,7 @@ fn write_report(
 
 fn write_line(out: &mut dyn Write, line: &str) -> Result<(), DipperError> {
     writeln!(out, "{line}").map_err(|err| DipperError::Source {
+        kind: crate::error::ErrorKind::Other,
         source_name: "stdout".to_string(),
         message: err.to_string(),
     })
@@ -1021,6 +1027,7 @@ fn write_line(out: &mut dyn Write, line: &str) -> Result<(), DipperError> {
 
 fn dip_err(message: impl Into<String>) -> DipperError {
     DipperError::Source {
+        kind: crate::error::ErrorKind::Other,
         source_name: "dip".to_string(),
         message: message.into(),
     }

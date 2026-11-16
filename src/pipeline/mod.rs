@@ -52,6 +52,9 @@ pub struct DipOutcome {
     pub warnings: u64,
     pub paging: &'static str,
     pub result: Result<(), String>,
+    /// Kind captured before the message was redacted. JSON uses this, not a
+    /// second classification of the withheld text.
+    pub error_kind: Option<crate::error::ErrorKind>,
 }
 
 /// Outcomes in run order, plus dips skipped after `--fail-fast`.
@@ -143,7 +146,7 @@ pub fn run(
 struct Attempt {
     rows: u64,
     warnings: u64,
-    result: Result<(), String>,
+    result: Result<(), (crate::error::ErrorKind, String)>,
 }
 
 fn run_one(
@@ -160,10 +163,7 @@ fn run_one(
     let paging = paging_name(dip.paging);
     let attempt = attempt_dip(config, dip, store, opts, opener, progress, events);
     let finished_at = SystemTime::now();
-    let mut result = attempt
-        .result
-        .map_err(|message| crate::output::redact_with_config(config, &message));
-    let record_error = result.as_ref().err().cloned();
+    let (mut error_kind, mut result) = finish_attempt(config, attempt.result);
     if let Err(err) = store.record_run(&RunRecord {
         dip: dip.name.clone(),
         source: dip.source.clone(),
@@ -171,7 +171,7 @@ fn run_one(
         finished_at,
         rows: attempt.rows,
         ok: result.is_ok(),
-        error: record_error,
+        error: result.as_ref().err().cloned(),
         paging,
         warnings: attempt.warnings,
         time_from: None,
@@ -179,6 +179,9 @@ fn run_one(
         load_mode: "replace",
     }) {
         let message = err.to_string();
+        if error_kind.is_none() {
+            error_kind = Some(err.kind());
+        }
         result = Err(match result {
             Ok(()) => message,
             Err(previous) => format!("{previous}; {message}"),
@@ -192,6 +195,7 @@ fn run_one(
         warnings: attempt.warnings,
         paging,
         result,
+        error_kind,
     }
 }
 
@@ -215,7 +219,7 @@ fn attempt_dip(
     };
     let opened = match opener.open(&dip.source, source_cfg, &open_opts) {
         Ok(opened) => opened,
-        Err(err) => return fail(0, 0, err.to_string()),
+        Err(err) => return fail_err(0, 0, err),
     };
 
     let mut warnings = warn_count(&opened.findings);
@@ -227,7 +231,7 @@ fn attempt_dip(
         Ok(report) => report,
         Err(err) => {
             drop(opened);
-            return fail(0, warnings, err.to_string());
+            return fail_err(0, warnings, err);
         }
     };
     warnings += warn_count(&report.findings);
@@ -251,7 +255,7 @@ fn attempt_dip(
             Ok(count) => Some(count),
             Err(err) => {
                 drop(opened);
-                return fail(0, warnings, err.to_string());
+                return fail_err(0, warnings, err);
             }
         }
     } else {
@@ -262,7 +266,7 @@ fn attempt_dip(
         Ok(load) => load,
         Err(err) => {
             drop(opened);
-            return fail(0, warnings, err.to_string());
+            return fail_err(0, warnings, err);
         }
     };
     progress.start(&dip.name, total);
@@ -278,13 +282,13 @@ fn attempt_dip(
                     warnings,
                     result: Ok(()),
                 },
-                Err(err) => fail(rows, warnings, err.to_string()),
+                Err(err) => fail_err(rows, warnings, err),
             }
         }
         Err(err) => {
             let rows = load.rows();
             drop(load);
-            fail(rows, warnings, err.to_string())
+            fail_err(rows, warnings, err)
         }
     }
 }
@@ -306,10 +310,20 @@ fn read_into(
 }
 
 fn fail(rows: u64, warnings: u64, message: String) -> Attempt {
+    let kind = crate::error::ErrorKind::from_text(&message);
     Attempt {
         rows,
         warnings,
-        result: Err(message),
+        result: Err((kind, message)),
+    }
+}
+
+fn fail_err(rows: u64, warnings: u64, err: DipperError) -> Attempt {
+    let kind = err.kind();
+    Attempt {
+        rows,
+        warnings,
+        result: Err((kind, err.error_message())),
     }
 }
 
@@ -409,10 +423,7 @@ fn run_period_one(
     let paging = paging_name(job.dip.paging);
     let attempt = attempt_period(config, job, store, opts, opener, progress, events);
     let finished_at = SystemTime::now();
-    let mut result = attempt
-        .result
-        .map_err(|message| crate::output::redact_with_config(config, &message));
-    let record_error = result.as_ref().err().cloned();
+    let (mut error_kind, mut result) = finish_attempt(config, attempt.result);
     let load_mode = match job.kind {
         PeriodKind::Fill => "fill",
         PeriodKind::Refresh => "refresh",
@@ -425,7 +436,7 @@ fn run_period_one(
         finished_at,
         rows: attempt.rows,
         ok: result.is_ok(),
-        error: record_error,
+        error: result.as_ref().err().cloned(),
         paging,
         warnings: attempt.warnings,
         time_from: Some(job.request_start),
@@ -433,6 +444,9 @@ fn run_period_one(
         load_mode,
     }) {
         let message = err.to_string();
+        if error_kind.is_none() {
+            error_kind = Some(err.kind());
+        }
         result = Err(match result {
             Ok(()) => message,
             Err(previous) => format!("{previous}; {message}"),
@@ -446,7 +460,17 @@ fn run_period_one(
         warnings: attempt.warnings,
         paging,
         result,
+        error_kind,
     }
+}
+
+fn finish_attempt(
+    config: &Config,
+    result: Result<(), (crate::error::ErrorKind, String)>,
+) -> (Option<crate::error::ErrorKind>, Result<(), String>) {
+    let error_kind = result.as_ref().err().map(|(kind, _)| *kind);
+    let result = result.map_err(|(_, message)| crate::output::redact_with_config(config, &message));
+    (error_kind, result)
 }
 
 fn attempt_period(
@@ -471,7 +495,7 @@ fn attempt_period(
         },
     ) {
         Ok(opened) => opened,
-        Err(err) => return fail(0, 0, err.to_string()),
+        Err(err) => return fail_err(0, 0, err),
     };
     let mut warnings = warn_count(&opened.findings);
     if let Err(message) = write_findings(events, &job.dip.name, &opened.findings) {
@@ -482,7 +506,7 @@ fn attempt_period(
         Ok(load) => load,
         Err(err) => {
             drop(opened);
-            return fail(0, warnings, err.to_string());
+            return fail_err(0, warnings, err);
         }
     };
     let mut hole_rows = Vec::new();
@@ -504,7 +528,7 @@ fn attempt_period(
                 drop(opened);
                 let rows = load.rows();
                 drop(load);
-                return fail(rows, warnings, err.to_string());
+                return fail_err(rows, warnings, err);
             }
         };
         warnings += warn_count(&report.findings);
@@ -531,7 +555,7 @@ fn attempt_period(
             drop(opened);
             let rows = load.rows();
             drop(load);
-            return fail(rows, warnings, err.to_string());
+            return fail_err(rows, warnings, err);
         }
         hole_rows.push(load.rows() - before);
     }
@@ -540,11 +564,11 @@ fn attempt_period(
     let rows = load.rows();
     let (staging, staged_rows, _columns) = match load.close_staging() {
         Ok(closed) => closed,
-        Err(err) => return fail(rows, warnings, err.to_string()),
+        Err(err) => return fail_err(rows, warnings, err),
     };
     let stored_column = match stored_time_column(store, &job.dip, &job.time_column) {
         Ok(column) => column,
-        Err(err) => return fail(rows, warnings, err.to_string()),
+        Err(err) => return fail_err(rows, warnings, err),
     };
     let slices = match job.kind {
         PeriodKind::Fill => hole_rows
@@ -559,7 +583,7 @@ fn attempt_period(
         PeriodKind::Refresh => {
             let held = match store.list_slices(&job.dip.name) {
                 Ok(held) => held,
-                Err(err) => return fail(rows, warnings, err.to_string()),
+                Err(err) => return fail_err(rows, warnings, err),
             };
             crate::store::plan_refresh(
                 &held,
@@ -600,7 +624,7 @@ fn attempt_period(
             warnings,
             result: Ok(()),
         },
-        Err(err) => fail(staged_rows, warnings, err.to_string()),
+        Err(err) => fail_err(staged_rows, warnings, err),
     }
 }
 
@@ -769,12 +793,14 @@ mod tests {
         fn select<'a>(&'a self, _spec: &SelectSpec) -> Result<ChunkIter<'a>, DipperError> {
             self.calls.lock().unwrap().select += 1;
             if self.fail_select {
+                let message = self
+                    .select_error
+                    .clone()
+                    .unwrap_or_else(|| "select should not run".to_string());
                 return Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::from_text(&message),
                     source_name: "sample".to_string(),
-                    message: self
-                        .select_error
-                        .clone()
-                        .unwrap_or_else(|| "select should not run".to_string()),
+                    message,
                 });
             }
             let chunk = Chunk {
@@ -789,6 +815,7 @@ mod tests {
             _table: &str,
         ) -> Result<crate::source::CatalogTable, DipperError> {
             Err(DipperError::Source {
+                kind: crate::error::ErrorKind::Other,
                 source_name: "sample".to_string(),
                 message: "catalog is not used by this probe".to_string(),
             })
@@ -814,6 +841,7 @@ mod tests {
         ) -> Result<Opened, DipperError> {
             if let Some(message) = &self.fail_open {
                 return Err(DipperError::Source {
+                    kind: crate::error::ErrorKind::Other,
                     source_name: name.to_string(),
                     message: message.clone(),
                 });
@@ -1142,7 +1170,7 @@ columns = ["ORDER_ID", "TS"]
         .unwrap_err();
         let stdout = String::from_utf8(stdout).unwrap();
         let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-        let dip_error = doc["dips"][0]["error"].as_str().unwrap();
+        let dip_error = doc["dips"][0]["error"]["message"].as_str().unwrap();
         assert_no_leak("json", &stdout);
         assert_no_leak("dip error", dip_error);
         assert!(
@@ -1207,11 +1235,72 @@ columns = ["ORDER_ID", "TS"]
             &mut events,
         );
         let message = report.outcomes[0].result.as_ref().unwrap_err();
+        assert_eq!(
+            report.outcomes[0].error_kind,
+            Some(crate::error::ErrorKind::ClientMissing)
+        );
         assert_no_leak("outcome", message);
         assert!(!message.contains('\u{1e}'), "{message}");
         assert!(
             message.contains(crate::output::SECRET_WITHHELD),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn dip_json_keeps_the_kind_after_the_message_is_withheld() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = secret_config(dir.path());
+        let run = |message: String| {
+            let opener = ProbeOpener {
+                calls: Arc::new(Mutex::new(Calls::default())),
+                fail_open: None,
+                findings: Vec::new(),
+                preflight: Vec::new(),
+                rows: vec![vec![Value::Int(1)]],
+                fail_select: true,
+                select_error: Some(message),
+            };
+            let mut stdout = Vec::new();
+            let _ = crate::commands::dip::run_with_opener(
+                &config,
+                &[],
+                false,
+                false,
+                false,
+                crate::commands::dip::PeriodCli {
+                    from: None,
+                    to: None,
+                    time_column: None,
+                    yes: false,
+                    replace_table: false,
+                    refresh: false,
+                },
+                crate::cli::OutputFormat::Json,
+                &opener,
+                &mut stdout,
+            );
+            String::from_utf8(stdout).unwrap()
+        };
+        let dpi = run(leak_message());
+        let doc: serde_json::Value = serde_json::from_str(dpi.trim()).unwrap();
+        assert_eq!(doc["dips"][0]["error"]["code"], "client_missing");
+        assert_no_leak("dpi json", &dpi);
+        assert!(
+            doc["dips"][0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(crate::output::SECRET_WITHHELD),
+            "{dpi}"
+        );
+
+        let missing = run("object not found: reader.T".to_string());
+        let doc: serde_json::Value = serde_json::from_str(missing.trim()).unwrap();
+        assert_eq!(doc["dips"][0]["error"]["code"], "object_not_found");
+        assert_no_leak("object json", &missing);
+        assert!(
+            !missing.to_ascii_lowercase().contains("reader"),
+            "{missing}"
         );
     }
 

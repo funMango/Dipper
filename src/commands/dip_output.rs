@@ -49,7 +49,7 @@ pub struct DipBody {
     pub rows_loaded: u64,
     pub seconds: Option<f64>,
     pub warnings: u64,
-    pub error: Option<String>,
+    pub error: Option<crate::output::ErrorBody>,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,11 +62,6 @@ pub struct SummaryBody {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ErrorBody {
-    pub message: String,
-}
-
-#[derive(Debug, Serialize)]
 pub struct DipDocument {
     pub schema_version: i32,
     pub command: &'static str,
@@ -75,7 +70,7 @@ pub struct DipDocument {
     pub period: Option<PeriodBody>,
     pub dips: Vec<DipBody>,
     pub summary: SummaryBody,
-    pub error: Option<ErrorBody>,
+    pub error: Option<crate::output::ErrorBody>,
 }
 
 pub fn summary_of(dips: &[DipBody]) -> SummaryBody {
@@ -108,18 +103,18 @@ pub fn json_error_document(err: &DipperError, period: Option<PeriodBody>) -> Dip
             not_run: 0,
             nothing_to_fetch: 0,
         },
-        error: Some(ErrorBody {
-            message: err.to_string(),
-        }),
+        error: Some(crate::output::ErrorBody::from_error(err)),
     }
 }
 
 pub fn write_json(out: &mut dyn Write, doc: &DipDocument) -> Result<(), DipperError> {
     let text = serde_json::to_string(doc).map_err(|err| DipperError::Source {
+        kind: crate::error::ErrorKind::Other,
         source_name: "stdout".to_string(),
         message: err.to_string(),
     })?;
     writeln!(out, "{text}").map_err(|err| DipperError::Source {
+        kind: crate::error::ErrorKind::Other,
         source_name: "stdout".to_string(),
         message: err.to_string(),
     })

@@ -164,6 +164,7 @@ fn bind_datetime(datetime: &toml::value::Datetime) -> Result<Value, DipperError>
 
 fn filter_error(message: impl Into<String>) -> DipperError {
     DipperError::Source {
+        kind: crate::error::ErrorKind::Other,
         source_name: "filter".to_string(),
         message: message.into(),
     }

@@ -387,6 +387,7 @@ fn json_files(dir: &Path) -> Vec<std::path::PathBuf> {
 
 pub fn ontology_error(message: impl Into<String>) -> DipperError {
     DipperError::Source {
+        kind: crate::error::ErrorKind::Other,
         source_name: "ontology".to_string(),
         message: message.into(),
     }

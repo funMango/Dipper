@@ -67,6 +67,40 @@ pub enum OntologyCommand {
     Render,
     /// Reject an overlay or extracted document that does not match the schema.
     Validate,
+    /// List tables and views from the dictionary. Does not read table rows.
+    List {
+        /// Source name from the config file.
+        source: String,
+        /// Oracle owner. Required for Oracle. SQLite defaults to `main`.
+        #[arg(long)]
+        owner: Option<String>,
+        /// `LIKE` pattern. Default `%`.
+        #[arg(long, default_value = "%")]
+        name_like: String,
+        /// Maximum rows. Default 200. Values outside 1..=2000 are a usage error.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=2000))]
+        limit: Option<u64>,
+        /// stdout format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
+    /// Find tables that contain a column. Does not read table rows.
+    Find {
+        /// Source name from the config file.
+        source: String,
+        /// Column name. Matched exactly after ASCII uppercase normalization.
+        #[arg(long)]
+        column: String,
+        /// Restrict the search to this owner.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Maximum rows. Default 200. Values outside 1..=2000 are a usage error.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=2000))]
+        limit: Option<u64>,
+        /// stdout format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
     /// Count how values in one table overlap another. Counts only, no row values.
     CheckRelation {
         /// Source name from the config file.
@@ -92,8 +126,15 @@ pub enum OntologyCommand {
 /// Subcommands. Arguments are added in later PRs.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Check that configured sources are reachable.
-    Check,
+    /// Check the environment, then that configured sources are reachable.
+    Check {
+        /// Print the environment section and do not open a source.
+        #[arg(long)]
+        env_only: bool,
+        /// stdout format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
     /// Copy selected data from sources into the local store.
     ///
     /// `--from` and `--to` load the missing part of a period. Ranges already
@@ -155,10 +196,17 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
         .try_init();
 
     match cli.command {
-        Command::Check => {
+        Command::Check { env_only, format } => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
-            crate::commands::check::run(&cli.config, cli.strict, cli.log_sql, &mut handle)
+            crate::commands::check::run(
+                &cli.config,
+                cli.strict,
+                cli.log_sql,
+                env_only,
+                format,
+                &mut handle,
+            )
         }
         Command::Dip {
             names,
@@ -214,6 +262,40 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
                 OntologyCommand::Validate => {
                     crate::commands::ontology::validate_docs(std::path::Path::new("."), &mut handle)
                 }
+                OntologyCommand::List {
+                    source,
+                    owner,
+                    name_like,
+                    limit,
+                    format,
+                } => crate::commands::ontology::list(
+                    &cli.config,
+                    &source,
+                    owner.as_deref(),
+                    &name_like,
+                    limit,
+                    cli.log_sql,
+                    cli.strict,
+                    format,
+                    &mut handle,
+                ),
+                OntologyCommand::Find {
+                    source,
+                    column,
+                    owner,
+                    limit,
+                    format,
+                } => crate::commands::ontology::find(
+                    &cli.config,
+                    &source,
+                    &column,
+                    owner.as_deref(),
+                    limit,
+                    cli.log_sql,
+                    cli.strict,
+                    format,
+                    &mut handle,
+                ),
                 OntologyCommand::CheckRelation {
                     source,
                     from_table,

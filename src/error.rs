@@ -4,6 +4,87 @@ use thiserror::Error;
 
 use crate::sql::guard::GuardError;
 
+/// Why a command failed. The code stays visible after the message is redacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    ConnectFailed,
+    ClientMissing,
+    AuthFailed,
+    ObjectNotFound,
+    PermissionDenied,
+    Timeout,
+    SessionBusy,
+    Config,
+    Usage,
+    Other,
+}
+
+impl ErrorKind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ConnectFailed => "connect_failed",
+            Self::ClientMissing => "client_missing",
+            Self::AuthFailed => "auth_failed",
+            Self::ObjectNotFound => "object_not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::Timeout => "timeout",
+            Self::SessionBusy => "session_busy",
+            Self::Config => "config",
+            Self::Usage => "usage",
+            Self::Other => "other",
+        }
+    }
+
+    /// Only connection, timeout, and a busy session are worth one later retry.
+    pub fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::ConnectFailed | Self::Timeout | Self::SessionBusy
+        )
+    }
+
+    /// Classify a driver or catalog message. Specific codes win over generic text.
+    pub fn from_text(text: &str) -> Self {
+        let upper = text.to_ascii_uppercase();
+        if upper.contains("DPI-1047") {
+            return Self::ClientMissing;
+        }
+        if upper.contains("ORA-01017") {
+            return Self::AuthFailed;
+        }
+        if upper.contains("ORA-12170")
+            || upper.contains("ORA-12541")
+            || upper.contains("ORA-12514")
+            || upper.contains("ORA-12537")
+            || upper.contains("DPI-1080")
+        {
+            return Self::ConnectFailed;
+        }
+        if upper.contains("ORA-00942") || upper.contains("ORA-04043") {
+            return Self::ObjectNotFound;
+        }
+        if upper.contains("ORA-01031") {
+            return Self::PermissionDenied;
+        }
+        if upper.contains("DPI-1067") || upper.contains("ORA-03136") {
+            return Self::Timeout;
+        }
+        if upper.contains("OBJECT NOT FOUND") || upper.contains("NO SUCH TABLE") {
+            return Self::ObjectNotFound;
+        }
+        if upper.contains("CANNOT OPEN") {
+            return Self::ConnectFailed;
+        }
+        Self::Other
+    }
+}
+
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
 /// Errors returned by the Dipper library.
 #[derive(Debug, Error)]
 pub enum DipperError {
@@ -30,9 +111,10 @@ pub enum DipperError {
     },
 
     /// A source could not be opened or checked.
-    #[error("{source_name}: {message}")]
+    #[error("{source_name}: [{kind}] {message}")]
     Source {
         source_name: String,
+        kind: ErrorKind,
         message: String,
     },
 
@@ -92,10 +174,41 @@ pub struct ConfigIssue {
 }
 
 impl DipperError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::ConfigNotFound(_) | Self::ConfigRead { .. } | Self::Config { .. } => {
+                ErrorKind::Config
+            }
+            Self::NotImplemented(_) | Self::UnknownDip(_) => ErrorKind::Usage,
+            Self::SourceBusy(_) => ErrorKind::SessionBusy,
+            Self::DeadlineExceeded { .. } => ErrorKind::Timeout,
+            Self::Source { kind, .. } => *kind,
+            Self::CheckFailed { .. }
+            | Self::Guard(_)
+            | Self::Refused { .. }
+            | Self::StrictReadonly { .. }
+            | Self::Store { .. }
+            | Self::DipFailed { .. } => ErrorKind::Other,
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.kind().retryable()
+    }
+
+    /// JSON `error.message`. This is the text after redaction, without the bracket code.
+    pub fn error_message(&self) -> String {
+        match self {
+            Self::Source { message, .. } => message.clone(),
+            other => other.to_string(),
+        }
+    }
+
     /// 종료코드 규약: 0 성공, 1 설정·실행 오류, 2 사용법 오류·미구현.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::NotImplemented(_) | Self::UnknownDip(_) => 2,
+            Self::Source { kind, .. } if *kind == ErrorKind::Usage => 2,
             Self::ConfigNotFound(_)
             | Self::ConfigRead { .. }
             | Self::Config { .. }

@@ -113,6 +113,27 @@ fn dip_help_lists_refresh() {
 }
 
 #[test]
+fn cli_help_lists_ontology_list_and_find() {
+    for command in ["list", "find"] {
+        let output = Command::cargo_bin("dipper")
+            .unwrap()
+            .args(["ontology", command, "--help"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{command}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("--format"), "{command}\n{stdout}");
+        assert!(stdout.contains("--limit"), "{command}\n{stdout}");
+        if command == "list" {
+            assert!(stdout.contains("--owner"), "{stdout}");
+            assert!(stdout.contains("--name-like"), "{stdout}");
+        } else {
+            assert!(stdout.contains("--column"), "{stdout}");
+        }
+    }
+}
+
+#[test]
 fn cli_help_lists_ontology_check_relation() {
     let output = Command::cargo_bin("dipper")
         .unwrap()
