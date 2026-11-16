@@ -77,7 +77,10 @@ fn tables_for(
     Ok(targets)
 }
 
-fn split_table(table: &str, source_cfg: &SourceConfig) -> Result<(String, String), DipperError> {
+pub(crate) fn split_table(
+    table: &str,
+    source_cfg: &SourceConfig,
+) -> Result<(String, String), DipperError> {
     let mut parts = table.split('.');
     let first = parts.next().unwrap_or("");
     let second = parts.next();
@@ -113,6 +116,18 @@ pub(crate) fn document(
         primary_key: catalog.primary_key.clone(),
         time_column: time_column(catalog),
         columns: catalog.columns.iter().map(column_doc).collect(),
+        foreign_keys: catalog
+            .foreign_keys
+            .iter()
+            .map(|key| crate::ontology::schema::ForeignKey {
+                name: key.name.clone(),
+                columns: key.columns.clone(),
+                target_owner: key.target_owner.clone(),
+                target_table: key.target_table.clone(),
+                target_columns: key.target_columns.clone(),
+            })
+            .collect(),
+        relations: Vec::new(),
     }
 }
 
@@ -220,6 +235,7 @@ mod tests {
                 column("VS", "NUMBER"),
                 column("XC", "NUMBER"),
             ],
+            foreign_keys: Vec::new(),
         };
         let doc = document("sample", "MAIN", "EVENTS", &catalog);
         assert!(doc.time_column.is_none());
@@ -242,6 +258,7 @@ mod tests {
                 column("EVENT_DT", "DATE"),
                 column("QTY", "INTEGER"),
             ],
+            foreign_keys: Vec::new(),
         };
         assert_eq!(time_column(&catalog).as_deref(), Some("EVENT_DT"));
     }
@@ -253,6 +270,7 @@ mod tests {
             table_comment: None,
             primary_key: vec!["EVENT_DT".to_string()],
             columns: vec![column("EVENT_DT", "DATE"), column("LOAD_DT", "TIMESTAMP")],
+            foreign_keys: Vec::new(),
         };
         assert!(time_column(&catalog).is_none());
     }

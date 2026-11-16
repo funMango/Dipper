@@ -113,6 +113,26 @@ fn dip_help_lists_refresh() {
 }
 
 #[test]
+fn cli_help_lists_ontology_check_relation() {
+    let output = Command::cargo_bin("dipper")
+        .unwrap()
+        .args(["ontology", "check-relation", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--from-table",
+        "--from-column",
+        "--to-table",
+        "--to-column",
+        "--format",
+    ] {
+        assert!(stdout.contains(flag), "missing {flag} in:\n{stdout}");
+    }
+}
+
+#[test]
 fn subcommands_are_not_implemented() {
     for name in ["tables", "show", "stats", "export"] {
         Command::cargo_bin("dipper")

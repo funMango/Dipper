@@ -1,6 +1,6 @@
 # JSON output
 
-`dipper dip` and `dipper ontology pull` accept `--format json`. Omitting `--format` keeps the existing table or path list. The flag is not global: `render` and `validate` do not take it.
+`dipper dip`, `dipper ontology pull`, and `dipper ontology check-relation` accept `--format json`. Omitting `--format` keeps the existing table or path list. The flag is not global: `render` and `validate` do not take it.
 
 `--format json` writes one JSON document to stdout and a final newline. Progress, `preview:`, `note:`, `ignored filter:`, `nothing to fetch:`, `--log-sql`, and `dipper:` stay on stderr. A clap usage error (exit 2), including an unknown format such as `--format xml`, writes no JSON.
 
@@ -10,7 +10,7 @@ Timestamps use `YYYY-MM-DDTHH:MM:SS` with no timezone. A period range is half-op
 
 JSON does not contain source row values, DuckDB samples, passwords, Oracle connect strings, or Oracle user names. An ignored config filter value is included because it comes from the config file. If an error contains the Oracle user (ASCII case-insensitive), password, full connect string, or the host, port, or service taken from that connect string, the whole message is replaced with `details withheld`. An `ORA-#####` or `DPI-####` code is kept only when that code does not itself contain one of those values. If every code in an already-withheld driver sentence contains a secret, that sentence becomes `driver error (driver message hidden because it contained the password)` (a password of `1047` does not leave `DPI-1047`). A code that does not contain a secret is left in the sentence. Percent-encoded connect text is not decoded.
 
-Redaction is not one function call. `redact_known_values` is the shared string rule. `run_one` and `run_period_one` apply it through `redact_with_config` to the outcome, and `_dipper_runs.error` is that same withheld text. The public `DipOutcome.result` does not keep the original message. `hide_text` applies the same rule again for JSON `dips[].error` and for the table error column in `write_report`. Pre-run dip failures go through `finish_error` → `redact_error`, and `ontology pull` failures go through `redact_ontology_error` → `redact_error`, before the JSON document and before the error returns to `main` for the `dipper:` line. A failed dip's `dipper:` line is `dip failed: …` and does not include the per-dip message; that message is in the table or JSON and in `_dipper_runs.error`.
+Redaction is not one function call. `redact_known_values` is the shared string rule. `run_one` and `run_period_one` apply it through `redact_with_config` to the outcome, and `_dipper_runs.error` is that same withheld text. The public `DipOutcome.result` does not keep the original message. `hide_text` applies the same rule again for JSON `dips[].error` and for the table error column in `write_report`. Pre-run dip failures go through `finish_error` → `redact_error`, and `ontology pull` and `ontology check-relation` failures go through `redact_ontology_error` → `redact_error`, before the JSON document and before the error returns to `main` for the `dipper:` line. A failed dip's `dipper:` line is `dip failed: …` and does not include the per-dip message; that message is in the table or JSON and in `_dipper_runs.error`.
 
 ## Exit codes
 
@@ -87,4 +87,25 @@ Example after August is already loaded and the request is 15 Aug through 30 Sep:
 
 ```json
 {"schema_version":1,"command":"ontology.pull","ok":true,"exit_code":0,"source":"sample","files":["ontology/extracted/sample/main.EVENTS.json"],"error":null}
+```
+
+## `ontology check-relation`
+
+Counts only. The document has no row values, key samples, connect strings, or database usernames.
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Integer `1`. |
+| `command` | `"ontology.check_relation"`. |
+| `ok`, `exit_code` | Same meaning as `dip`. |
+| `source` | The source name argument. |
+| `from`, `to` | `owner`, `table`, and `columns`. |
+| `source_non_null_rows` | Rows in the source table whose listed columns are all non-null. |
+| `target_non_null_rows` | Rows in the target table whose listed columns are all non-null. |
+| `matched_rows` | Source rows whose values occur together in the target table. |
+| `match_ratio` | `matched_rows / source_non_null_rows`, or `0.0` when the source count is zero. |
+| `error` | `{"message": "..."}` on failure, otherwise null. |
+
+```json
+{"schema_version":1,"command":"ontology.check_relation","ok":true,"exit_code":0,"source":"sample","from":{"owner":"main","table":"ORDERS","columns":["CROSS_ID"]},"to":{"owner":"main","table":"INTERSECTIONS","columns":["CROSS_ID"]},"source_non_null_rows":1200,"target_non_null_rows":80,"matched_rows":1195,"match_ratio":0.9958333333333333,"error":null}
 ```

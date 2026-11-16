@@ -38,7 +38,9 @@ flowchart LR
 
 Dipper is in early development. There is no installable release yet. Installation and usage instructions will be added later.
 
-`dipper dip` and `dipper ontology pull` can print one JSON document with `--format json`. The field list is in [docs/CLI_JSON.md](docs/CLI_JSON.md).
+`dipper dip`, `dipper ontology pull`, and `dipper ontology check-relation` can print one JSON document with `--format json`. The field list is in [docs/CLI_JSON.md](docs/CLI_JSON.md).
+
+An external assistant can follow [skills/dipper/SKILL.md](skills/dipper/SKILL.md) to pull an ontology, record draft meanings and relationships, render Obsidian notes, and run a period dip. It calls the Dipper CLI only.
 
 ## Contributing
 

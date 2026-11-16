@@ -10,6 +10,10 @@
 //! ```compile_fail
 //! let _g = dipper::sql::guard::GuardedSelect::from(String::new());
 //! ```
+//!
+//! ```compile_fail
+//! let _g = dipper::sql::guard::GuardedSql::from("SELECT 1");
+//! ```
 
 use std::ops::ControlFlow;
 
@@ -435,6 +439,324 @@ fn check_ident(ident: &Ident, dialect: SqlDialect) -> Result<(), GuardError> {
         ));
     }
     Ok(())
+}
+
+/// The only overlap aggregate Dipper will run. `GuardedSelect::parse` still rejects it.
+#[derive(Debug, Clone)]
+pub struct GuardedOverlapSelect {
+    sql: String,
+    dialect: SqlDialect,
+}
+
+impl GuardedOverlapSelect {
+    pub fn parse(sql: &str, dialect: SqlDialect) -> Result<Self, GuardError> {
+        reject_comments(sql, dialect)?;
+        let parsed = Parser::parse_sql(dialect_impl(dialect).as_ref(), sql)
+            .map_err(|err| GuardError(err.to_string()))?;
+        if parsed.len() != 1 {
+            return Err(GuardError("exactly one statement is required".to_string()));
+        }
+        let Statement::Query(query) = &parsed[0] else {
+            return Err(GuardError("overlap check must be a SELECT".to_string()));
+        };
+        check_overlap_query(query, dialect)?;
+        Ok(Self {
+            sql: sql.to_string(),
+            dialect,
+        })
+    }
+
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    pub fn dialect(&self) -> SqlDialect {
+        self.dialect
+    }
+}
+
+/// A statement that already passed [`GuardedSelect::parse`] or [`GuardedOverlapSelect::parse`].
+///
+/// Session reads take this type so a raw SQL string cannot reach the driver.
+#[derive(Debug, Clone)]
+pub enum GuardedSql {
+    Select(GuardedSelect),
+    Overlap(GuardedOverlapSelect),
+}
+
+impl GuardedSql {
+    pub fn sql(&self) -> &str {
+        match self {
+            Self::Select(query) => query.sql(),
+            Self::Overlap(query) => query.sql(),
+        }
+    }
+
+    pub fn dialect(&self) -> SqlDialect {
+        match self {
+            Self::Select(query) => query.dialect(),
+            Self::Overlap(query) => query.dialect(),
+        }
+    }
+}
+
+impl From<GuardedSelect> for GuardedSql {
+    fn from(query: GuardedSelect) -> Self {
+        Self::Select(query)
+    }
+}
+
+impl From<GuardedOverlapSelect> for GuardedSql {
+    fn from(query: GuardedOverlapSelect) -> Self {
+        Self::Overlap(query)
+    }
+}
+
+fn check_overlap_query(query: &Query, dialect: SqlDialect) -> Result<(), GuardError> {
+    reject_query_extras(query)?;
+    let select = plain_select(query)?;
+    reject_select_extras(select)?;
+    if select.projection.len() != 1 || !overlap_projects_count(&select.projection[0]) {
+        return Err(GuardError(
+            "overlap check must project COUNT(*)".to_string(),
+        ));
+    }
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() {
+        return Err(GuardError("JOIN is not allowed".to_string()));
+    }
+    require_alias(&select.from[0].relation, dialect, "A")?;
+    let Some(selection) = &select.selection else {
+        return Err(GuardError("overlap check needs a WHERE".to_string()));
+    };
+    let mut nulls = Vec::new();
+    let mut exists = None;
+    collect_overlap_terms(selection, &mut nulls, &mut exists)?;
+    if nulls.is_empty() || exists.is_none() {
+        return Err(GuardError(
+            "overlap check must test NOT NULL and EXISTS".to_string(),
+        ));
+    }
+    let exists = exists.unwrap();
+    check_exists(exists, dialect, &nulls)?;
+    Ok(())
+}
+
+fn overlap_projects_count(item: &SelectItem) -> bool {
+    let SelectItem::UnnamedExpr(Expr::Function(function)) = item else {
+        return false;
+    };
+    is_count_star(function)
+}
+
+fn collect_overlap_terms<'a>(
+    expr: &'a Expr,
+    nulls: &mut Vec<&'a Expr>,
+    exists: &mut Option<&'a Query>,
+) -> Result<(), GuardError> {
+    match expr {
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::And => {
+            collect_overlap_terms(left, nulls, exists)?;
+            collect_overlap_terms(right, nulls, exists)
+        }
+        Expr::IsNotNull(inner) => {
+            nulls.push(inner);
+            Ok(())
+        }
+        Expr::Exists { subquery, negated } if !negated => {
+            if exists.replace(subquery.as_ref()).is_some() {
+                return Err(GuardError("one EXISTS only".to_string()));
+            }
+            Ok(())
+        }
+        _ => Err(GuardError(
+            "overlap WHERE must be NOT NULL and EXISTS".to_string(),
+        )),
+    }
+}
+
+fn check_exists(query: &Query, dialect: SqlDialect, nulls: &[&Expr]) -> Result<(), GuardError> {
+    reject_query_extras(query)?;
+    let select = plain_select(query)?;
+    reject_select_extras(select)?;
+    if select.projection.len() != 1 || !is_numeric_one(&select.projection[0]) {
+        return Err(GuardError("EXISTS must project 1".to_string()));
+    }
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() {
+        return Err(GuardError("EXISTS cannot join".to_string()));
+    }
+    require_alias(&select.from[0].relation, dialect, "B")?;
+    let Some(selection) = &select.selection else {
+        return Err(GuardError("EXISTS needs a WHERE".to_string()));
+    };
+    let mut pairs = Vec::new();
+    collect_equals(selection, &mut pairs)?;
+    if pairs.len() != nulls.len() {
+        return Err(GuardError(
+            "EXISTS equalities must match the NOT NULL columns".to_string(),
+        ));
+    }
+    for (null_expr, (left, right)) in nulls.iter().zip(pairs) {
+        let source = qualified_column(null_expr, "A", dialect)?;
+        let (target, matched) = match (
+            qualified_column(left, "B", dialect),
+            qualified_column(right, "A", dialect),
+        ) {
+            (Ok(target), Ok(matched)) => (target, matched),
+            _ => {
+                let target = qualified_column(right, "B", dialect)?;
+                let matched = qualified_column(left, "A", dialect)?;
+                (target, matched)
+            }
+        };
+        if matched != source || target.is_empty() {
+            return Err(GuardError(
+                "EXISTS must compare the same quoted columns".to_string(),
+            ));
+        }
+        let _ = target;
+    }
+    Ok(())
+}
+
+fn reject_query_extras(query: &Query) -> Result<(), GuardError> {
+    if query.with.is_some()
+        || query.order_by.is_some()
+        || query.limit_clause.is_some()
+        || query.fetch.is_some()
+        || query.for_clause.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
+        || !query.locks.is_empty()
+        || !query.pipe_operators.is_empty()
+    {
+        return Err(GuardError(
+            "overlap check cannot have extra clauses".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn plain_select(query: &Query) -> Result<&Select, GuardError> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Err(GuardError("overlap check must be one SELECT".to_string()));
+    };
+    Ok(select)
+}
+
+fn reject_select_extras(select: &Select) -> Result<(), GuardError> {
+    if select.flavor != SelectFlavor::Standard
+        || select.distinct.is_some()
+        || !select.optimizer_hints.is_empty()
+        || select.select_modifiers.is_some()
+        || select.top.is_some()
+        || select.exclude.is_some()
+        || select.into.is_some()
+        || select.prewhere.is_some()
+        || select.having.is_some()
+        || select.qualify.is_some()
+        || select.value_table_mode.is_some()
+        || !select.lateral_views.is_empty()
+        || !select.connect_by.is_empty()
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || !select.named_window.is_empty()
+    {
+        return Err(GuardError("unsupported SELECT clause".to_string()));
+    }
+    if !matches!(
+        &select.group_by,
+        GroupByExpr::Expressions(exprs, mods) if exprs.is_empty() && mods.is_empty()
+    ) {
+        return Err(GuardError("GROUP BY is not allowed".to_string()));
+    }
+    Ok(())
+}
+
+fn require_alias(
+    relation: &TableFactor,
+    dialect: SqlDialect,
+    expected: &str,
+) -> Result<(), GuardError> {
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        with_hints,
+        version: None,
+        with_ordinality: false,
+        partitions,
+        json_path: None,
+        sample: None,
+        index_hints,
+    } = relation
+    else {
+        return Err(GuardError("overlap table must be a plain name".to_string()));
+    };
+    if !with_hints.is_empty() || !partitions.is_empty() || !index_hints.is_empty() {
+        return Err(GuardError("table hints are not allowed".to_string()));
+    }
+    check_object_name(name, dialect)?;
+    let Some(alias) = alias else {
+        return Err(GuardError(format!("overlap table needs alias {expected}")));
+    };
+    if alias.name.value != expected || !alias.columns.is_empty() {
+        return Err(GuardError(format!("overlap alias must be {expected}")));
+    }
+    check_ident(&alias.name, dialect)?;
+    Ok(())
+}
+
+fn qualified_column<'a>(
+    expr: &'a Expr,
+    alias: &str,
+    dialect: SqlDialect,
+) -> Result<&'a str, GuardError> {
+    let Expr::CompoundIdentifier(parts) = expr else {
+        return Err(GuardError(
+            "overlap columns must be quoted and qualified".to_string(),
+        ));
+    };
+    if parts.len() != 2 || parts[0].value != alias {
+        return Err(GuardError(
+            "overlap columns must use the table alias".to_string(),
+        ));
+    }
+    check_ident(&parts[0], dialect)?;
+    check_ident(&parts[1], dialect)?;
+    Ok(parts[1].value.as_str())
+}
+
+fn is_numeric_one(item: &SelectItem) -> bool {
+    let SelectItem::UnnamedExpr(expr) = item else {
+        return false;
+    };
+    match expr {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(number, _),
+            ..
+        }) => number == "1",
+        _ => false,
+    }
+}
+
+fn collect_equals<'a>(
+    expr: &'a Expr,
+    pairs: &mut Vec<(&'a Expr, &'a Expr)>,
+) -> Result<(), GuardError> {
+    match expr {
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::And => {
+            collect_equals(left, pairs)?;
+            collect_equals(right, pairs)
+        }
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::Eq => {
+            pairs.push((left, right));
+            Ok(())
+        }
+        _ => Err(GuardError(
+            "EXISTS WHERE must compare quoted columns".to_string(),
+        )),
+    }
 }
 
 fn is_bare_pseudocolumn(ident: &Ident) -> bool {

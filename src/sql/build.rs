@@ -2,7 +2,7 @@ use crate::error::DipperError;
 use crate::source::{SelectSpec, Value};
 use crate::sql::dialect::{placeholder, quote};
 use crate::sql::filter::where_clause;
-use crate::sql::guard::{GuardedSelect, SqlDialect};
+use crate::sql::guard::{GuardedOverlapSelect, GuardedSelect, SqlDialect};
 
 /// A checked plan for reading one dip. Limit and key binds are appended at execution time.
 #[derive(Debug, Clone)]
@@ -95,6 +95,38 @@ pub fn count(
     };
     let sql = format!("SELECT COUNT(*) FROM {from}{where_sql}");
     Ok((parse(dialect, &sql)?, binds))
+}
+
+/// The only EXISTS overlap count Dipper runs.
+pub fn overlap_counts(
+    dialect: SqlDialect,
+    from_table: &str,
+    from_columns: &[String],
+    to_table: &str,
+    to_columns: &[String],
+) -> Result<GuardedOverlapSelect, DipperError> {
+    if from_columns.is_empty() || from_columns.len() != to_columns.len() {
+        return Err(DipperError::Source {
+            source_name: "sql".to_string(),
+            message: "overlap columns must match".to_string(),
+        });
+    }
+    let from = quote(dialect, from_table);
+    let to = quote(dialect, to_table);
+    let mut nulls = Vec::new();
+    let mut equals = Vec::new();
+    for (from_column, to_column) in from_columns.iter().zip(to_columns) {
+        let from_quoted = quote(dialect, from_column);
+        let to_quoted = quote(dialect, to_column);
+        nulls.push(format!("\"A\".{from_quoted} IS NOT NULL"));
+        equals.push(format!("\"B\".{to_quoted} = \"A\".{from_quoted}"));
+    }
+    let sql = format!(
+        "SELECT COUNT(*) FROM {from} \"A\" WHERE {} AND EXISTS (SELECT 1 FROM {to} \"B\" WHERE {})",
+        nulls.join(" AND "),
+        equals.join(" AND ")
+    );
+    Ok(GuardedOverlapSelect::parse(&sql, dialect)?)
 }
 
 fn key_columns(columns: &[String], key: &str) -> (Vec<String>, usize, bool) {

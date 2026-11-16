@@ -12,8 +12,16 @@ pub const VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum FieldStatus {
     Confirmed,
+    Draft,
     Estimated,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationStatus {
+    Draft,
+    Confirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,6 +55,43 @@ pub struct OntologyDoc {
     pub primary_key: Vec<String>,
     pub time_column: Option<String>,
     pub columns: Vec<OntologyColumn>,
+    #[serde(default)]
+    pub foreign_keys: Vec<ForeignKey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<Relation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForeignKey {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+    pub target_owner: String,
+    pub target_table: String,
+    pub target_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverlapSummary {
+    pub source_non_null_rows: u64,
+    pub target_non_null_rows: u64,
+    pub matched_rows: u64,
+    pub match_ratio: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relation {
+    pub columns: Vec<String>,
+    pub target_owner: String,
+    pub target_table: String,
+    pub target_columns: Vec<String>,
+    pub status: RelationStatus,
+    #[serde(default)]
+    pub evidence: Option<String>,
+    #[serde(default)]
+    pub overlap: Option<OverlapSummary>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +116,8 @@ pub struct OverlayDoc {
     pub time_column: Option<String>,
     #[serde(default)]
     pub columns: Vec<OverlayColumn>,
+    #[serde(default)]
+    pub relations: Vec<Relation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +188,28 @@ impl OntologyDoc {
                 ));
             }
         }
+        for foreign_key in &self.foreign_keys {
+            check_pair(
+                &foreign_key.columns,
+                &foreign_key.target_columns,
+                "foreign key",
+            )?;
+            for column in &foreign_key.columns {
+                if !names.contains(&column.as_str()) {
+                    return Err(format!("foreign key column {column} is not in columns"));
+                }
+            }
+        }
+        for relation in &self.relations {
+            check_relation_shape(relation)?;
+            for column in &relation.columns {
+                if !names.contains(&column.as_str()) {
+                    return Err(format!(
+                        "relation column {column} is not in the extracted table"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -180,7 +249,58 @@ pub fn parse_overlay(text: &str) -> Result<OverlayDoc, String> {
             ));
         }
     }
+    for relation in &doc.relations {
+        check_relation_shape(relation)?;
+    }
     Ok(doc)
+}
+
+fn check_pair(columns: &[String], target_columns: &[String], kind: &str) -> Result<(), String> {
+    if columns.is_empty() || target_columns.is_empty() {
+        return Err(format!("{kind} columns must not be empty"));
+    }
+    if columns.len() != target_columns.len() {
+        return Err(format!("{kind} column counts must match"));
+    }
+    Ok(())
+}
+
+fn check_relation_shape(relation: &Relation) -> Result<(), String> {
+    check_pair(&relation.columns, &relation.target_columns, "relation")?;
+    for name in relation
+        .columns
+        .iter()
+        .chain(relation.target_columns.iter())
+    {
+        if !relation_token_ok(name) {
+            return Err(format!("relation column {name} is not a safe name"));
+        }
+    }
+    if !relation_token_ok(&relation.target_owner) || !relation_token_ok(&relation.target_table) {
+        return Err("relation target must not contain a path or wikilink".to_string());
+    }
+    if relation.status == RelationStatus::Draft {
+        let Some(evidence) = relation.evidence.as_deref() else {
+            return Err("draft relation requires evidence".to_string());
+        };
+        if evidence.trim().is_empty() {
+            return Err("draft relation requires evidence".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn relation_token_ok(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains("[[")
+        && !name.contains("]]")
+        && !name.contains('|')
+        && !name.contains('`')
+        && !name.contains('\n')
+        && !name.contains('\r')
 }
 
 pub fn validate(root: &Path) -> Result<(), DipperError> {
@@ -269,5 +389,104 @@ pub fn ontology_error(message: impl Into<String>) -> DipperError {
     DipperError::Source {
         source_name: "ontology".to_string(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extracted() -> OntologyDoc {
+        OntologyDoc {
+            version: VERSION,
+            source: "sample".to_string(),
+            owner: "main".to_string(),
+            table: "EVENTS".to_string(),
+            extracted_at: "2026-11-11T00:00:00Z".to_string(),
+            object_type: "TABLE".to_string(),
+            table_comment: None,
+            primary_key: vec!["QTY".to_string()],
+            time_column: None,
+            foreign_keys: Vec::new(),
+            relations: Vec::new(),
+            columns: vec![OntologyColumn {
+                name: "QTY".to_string(),
+                data_type: "INTEGER".to_string(),
+                data_length: None,
+                data_precision: None,
+                data_scale: None,
+                nullable: true,
+                is_virtual: false,
+                db_comment: None,
+                meaning: None,
+                meaning_status: FieldStatus::Unknown,
+                unit: None,
+                unit_status: FieldStatus::Unknown,
+            }],
+        }
+    }
+
+    #[test]
+    fn overlay_accepts_draft_and_legacy_estimated_statuses() {
+        for status in ["draft", "confirmed", "estimated"] {
+            let overlay = parse_overlay(&format!(
+                r#"{{"version":1,"columns":[{{"name":"QTY","meaning":"how many","meaning_status":"{status}"}}]}}"#
+            ))
+            .unwrap_or_else(|err| panic!("{status}: {err}"));
+            let merged = crate::ontology::merge::merge(&extracted(), &overlay)
+                .unwrap_or_else(|err| panic!("{status}: {err}"));
+            assert_eq!(merged.columns[0].meaning.as_deref(), Some("how many"));
+            assert_eq!(status_name(merged.columns[0].meaning_status), status);
+        }
+        let overlay = parse_overlay(
+            r#"{"version":1,"columns":[{"name":"QTY","meaning":"how many","meaning_status":"unknown"}]}"#,
+        )
+        .unwrap();
+        let err = crate::ontology::merge::merge(&extracted(), &overlay).unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
+        let err = parse_overlay(
+            r#"{"version":1,"relations":[{"columns":["QTY"],"target_owner":"main","target_table":"OTHER","target_columns":["QTY"],"status":"unknown","evidence":"same name"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
+    }
+
+    #[test]
+    fn extracted_relations_are_validated_without_an_overlay() {
+        let mut doc = extracted();
+        doc.relations.push(Relation {
+            columns: vec!["QTY".to_string()],
+            target_owner: "main".to_string(),
+            target_table: "OTHER".to_string(),
+            target_columns: vec!["QTY".to_string()],
+            status: RelationStatus::Draft,
+            evidence: Some("same name".to_string()),
+            overlap: None,
+        });
+        let text = serde_json::to_string(&doc).unwrap();
+        parse_doc(&text).unwrap();
+
+        doc.relations[0].target_table = "A[[B".to_string();
+        let err = doc.check().unwrap_err();
+        assert!(err.contains("wikilink") || err.contains("safe"), "{err}");
+        doc.relations[0].target_table = "A]]B".to_string();
+        assert!(doc.check().is_err());
+        doc.relations[0].target_table = "OTHER".to_string();
+        doc.relations[0].evidence = Some("   ".to_string());
+        let err = doc.check().unwrap_err();
+        assert!(err.contains("evidence"), "{err}");
+        doc.relations[0].evidence = Some("same name".to_string());
+        doc.relations[0].columns = vec!["MISSING".to_string()];
+        let err = doc.check().unwrap_err();
+        assert!(err.contains("MISSING"), "{err}");
+    }
+
+    fn status_name(status: FieldStatus) -> &'static str {
+        match status {
+            FieldStatus::Confirmed => "confirmed",
+            FieldStatus::Draft => "draft",
+            FieldStatus::Estimated => "estimated",
+            FieldStatus::Unknown => "unknown",
+        }
     }
 }
