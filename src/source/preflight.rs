@@ -1414,6 +1414,14 @@ mod tests {
             if sql.to_ascii_uppercase().contains(" ORDER BY ") {
                 assert!(sql.contains("ORDER BY \""), "{sql}");
             }
+            if query == DictQuery::FindColumns {
+                assert!(
+                    sql.contains(
+                        "WHERE \"COLUMN_NAME\" = :1 ORDER BY \"OWNER\", \"TABLE_NAME\" FETCH FIRST :2"
+                    ),
+                    "{sql}"
+                );
+            }
             let upper = sql.to_ascii_uppercase();
             if upper.contains("FETCH") {
                 assert!(upper.contains("FETCH FIRST") && sql.contains(':'), "{sql}");

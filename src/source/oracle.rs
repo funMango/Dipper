@@ -649,9 +649,6 @@ fn list_tables_from(
     let cap = Value::Int(page_cap(limit));
     let mut entries = Vec::new();
     for kind in ["TABLE", "VIEW"] {
-        if entries.len() > limit {
-            break;
-        }
         let rows = dict.rows(
             DictQuery::ListObjects,
             &[
@@ -1112,6 +1109,9 @@ mod tests {
 
         assert_list_page(&[], &[], 2, &[], false);
         assert_list_page(&["ONLY"], &[], 2, &["ONLY"], false);
+        assert_list_page(&["AA", "BB"], &[], 2, &["AA", "BB"], false);
+        assert_list_page(&["AA", "BB"], &["AB"], 2, &["AA", "AB"], true);
+        assert_list_page(&["BB", "CC", "DD"], &["AA"], 2, &["AA", "BB"], true);
         assert_list_page(&["ZEBRA"], &["YAK"], 2, &["YAK", "ZEBRA"], false);
         assert_list_page(
             &["ZEBRA"],
@@ -1119,6 +1119,13 @@ mod tests {
             2,
             &["APPLE", "YAK"],
             true,
+        );
+        let no_owner = DictQuery::FindColumns.sql();
+        assert!(
+            no_owner.contains(
+                "WHERE \"COLUMN_NAME\" = :1 ORDER BY \"OWNER\", \"TABLE_NAME\" FETCH FIRST :2"
+            ),
+            "{no_owner}"
         );
 
         assert_find_page(&["ONLY"], 2, &["ONLY"], false);
@@ -1139,10 +1146,12 @@ mod tests {
         tables: Vec<Vec<Value>>,
         views: Vec<Vec<Value>>,
         columns: Vec<Vec<Value>>,
+        calls: Mutex<Vec<(DictQuery, Vec<Value>)>>,
     }
 
     impl Dictionary for ScriptedDict {
         fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError> {
+            self.calls.lock().unwrap().push((query, binds.to_vec()));
             Ok(match query {
                 DictQuery::ListObjects => {
                     if binds.get(1) == Some(&Value::Text("TABLE".into())) {
@@ -1171,6 +1180,7 @@ mod tests {
                 .collect(),
             views: views.iter().map(|name| object_row(name, "VIEW")).collect(),
             columns: Vec::new(),
+            calls: Mutex::new(Vec::new()),
         };
         let page = list_tables_from(&dict, "company", "appuser", "%", limit).unwrap();
         let got: Vec<&str> = page.items.iter().map(|item| item.table.as_str()).collect();
@@ -1180,6 +1190,18 @@ mod tests {
         );
         assert_eq!(page.truncated, truncated);
         assert!(page.items.len() <= limit);
+        let kinds: Vec<String> = dict
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(query, _)| *query == DictQuery::ListObjects)
+            .map(|(_, binds)| match binds.get(1) {
+                Some(Value::Text(kind)) => kind.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(kinds, ["TABLE".to_string(), "VIEW".to_string()]);
     }
 
     fn assert_find_page(tables: &[&str], limit: usize, names: &[&str], truncated: bool) {
@@ -1190,12 +1212,31 @@ mod tests {
                 .iter()
                 .map(|name| column_row("APPUSER", name))
                 .collect(),
+            calls: Mutex::new(Vec::new()),
         };
         let page = find_columns_from(&dict, "company", "order_id", Some("appuser"), limit).unwrap();
         let got: Vec<&str> = page.items.iter().map(|item| item.table.as_str()).collect();
         assert_eq!(got, names, "columns {tables:?} limit {limit}");
         assert_eq!(page.truncated, truncated);
         assert!(page.items.len() <= limit);
+    }
+
+    #[test]
+    fn oracle_list_merges_tables_and_views_in_name_order() {
+        assert_list_page(&["AA", "BB"], &[], 2, &["AA", "BB"], false);
+        assert_list_page(&["AA", "BB"], &["AB"], 2, &["AA", "AB"], true);
+        assert_list_page(&["BB", "CC", "DD"], &["AA"], 2, &["AA", "BB"], true);
+    }
+
+    #[test]
+    fn find_columns_without_owner_orders_by_owner_and_table() {
+        let sql = DictQuery::FindColumns.sql();
+        assert!(
+            sql.contains(
+                "WHERE \"COLUMN_NAME\" = :1 ORDER BY \"OWNER\", \"TABLE_NAME\" FETCH FIRST :2"
+            ),
+            "{sql}"
+        );
     }
 
     #[test]
