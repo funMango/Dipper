@@ -673,9 +673,6 @@ fn list_tables_from(
                 comment: None,
                 num_rows_estimate: None,
             });
-            if entries.len() > limit {
-                break;
-            }
         }
     }
     let comments = dict.rows(
@@ -1117,7 +1114,7 @@ mod tests {
             &["ZEBRA"],
             &["YAK", "APPLE", "BANANA"],
             2,
-            &["APPLE", "YAK"],
+            &["APPLE", "BANANA"],
             true,
         );
         let no_owner = DictQuery::FindColumns.sql();
@@ -1133,9 +1130,13 @@ mod tests {
         assert_find_page(
             &["ZEBRA", "YAK", "APPLE", "BANANA"],
             2,
-            &["APPLE", "YAK"],
+            &["APPLE", "BANANA"],
             true,
         );
+    }
+
+    fn text_at(row: &[Value], index: usize) -> String {
+        crate::source::cell_text(row, index).unwrap_or_default()
     }
 
     fn object_row(name: &str, kind: &str) -> Vec<Value> {
@@ -1152,7 +1153,7 @@ mod tests {
     impl Dictionary for ScriptedDict {
         fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError> {
             self.calls.lock().unwrap().push((query, binds.to_vec()));
-            Ok(match query {
+            let mut rows = match query {
                 DictQuery::ListObjects => {
                     if binds.get(1) == Some(&Value::Text("TABLE".into())) {
                         self.tables.clone()
@@ -1162,7 +1163,24 @@ mod tests {
                 }
                 DictQuery::FindColumns | DictQuery::FindColumnsByOwner => self.columns.clone(),
                 _ => Vec::new(),
-            })
+            };
+            match query {
+                DictQuery::ListObjects => rows.sort_by_key(|row| text_at(row, 0)),
+                DictQuery::FindColumns | DictQuery::FindColumnsByOwner => {
+                    rows.sort_by_key(|row| (text_at(row, 0), text_at(row, 1)));
+                }
+                _ => {}
+            }
+            if matches!(
+                query,
+                DictQuery::ListObjects | DictQuery::FindColumns | DictQuery::FindColumnsByOwner
+            ) {
+                if let Some(Value::Int(cap)) = binds.last() {
+                    let cap = usize::try_from(*cap).unwrap_or(0);
+                    rows.truncate(cap);
+                }
+            }
+            Ok(rows)
         }
     }
 
@@ -1226,6 +1244,8 @@ mod tests {
         assert_list_page(&["AA", "BB"], &[], 2, &["AA", "BB"], false);
         assert_list_page(&["AA", "BB"], &["AB"], 2, &["AA", "AB"], true);
         assert_list_page(&["BB", "CC", "DD"], &["AA"], 2, &["AA", "BB"], true);
+        assert_list_page(&["CC", "DD", "EE"], &["AA", "AB"], 2, &["AA", "AB"], true);
+        assert_list_page(&["CC", "DD"], &["AA", "AB", "AC"], 2, &["AA", "AB"], true);
     }
 
     #[test]
