@@ -642,12 +642,16 @@ fn list_tables_from(
     name_like: &str,
     limit: usize,
 ) -> Result<crate::source::CatalogPage<crate::source::CatalogEntry>, DipperError> {
-    crate::sql::validate_ident(owner).map_err(|message| message_error(name, message))?;
-    let owner_bind = Value::Text(owner.to_string());
+    let owner = owner.to_ascii_uppercase();
+    crate::sql::validate_ident(&owner).map_err(|message| message_error(name, message))?;
+    let owner_bind = Value::Text(owner.clone());
     let pattern = Value::Text(name_like.to_string());
     let cap = Value::Int(page_cap(limit));
     let mut entries = Vec::new();
     for kind in ["TABLE", "VIEW"] {
+        if entries.len() > limit {
+            break;
+        }
         let rows = dict.rows(
             DictQuery::ListObjects,
             &[
@@ -715,11 +719,12 @@ pub(crate) fn find_columns_from(
 ) -> Result<crate::source::CatalogPage<crate::source::ColumnHit>, DipperError> {
     let column = column.to_ascii_uppercase();
     crate::sql::validate_column_ident(&column).map_err(|message| message_error(name, message))?;
-    if let Some(owner) = owner {
+    let owner = owner.map(|owner| owner.to_ascii_uppercase());
+    if let Some(owner) = owner.as_deref() {
         crate::sql::validate_ident(owner).map_err(|message| message_error(name, message))?;
     }
     let cap = Value::Int(page_cap(limit));
-    let (query, binds) = match owner {
+    let (query, binds) = match owner.as_deref() {
         Some(owner) => (
             DictQuery::FindColumnsByOwner,
             vec![Value::Text(column), Value::Text(owner.to_string()), cap],
@@ -758,7 +763,7 @@ pub(crate) fn find_columns_from(
         }
         hits
     }
-    let mut hits = collect(rows, owner, limit);
+    let mut hits = collect(rows, owner.as_deref(), limit);
     hits.sort_by(|left, right| {
         left.owner
             .cmp(&right.owner)
@@ -1062,7 +1067,7 @@ mod tests {
         assert!(DictQuery::ListObjects.sql().contains("\"OWNER\" = :1"));
         assert!(DictQuery::ListObjects
             .sql()
-            .contains("FETCH FIRST :4 ROWS ONLY"));
+            .contains("ORDER BY \"OBJECT_NAME\" FETCH FIRST :4 ROWS ONLY"));
         let comments = calls
             .iter()
             .find(|(query, _)| *query == DictQuery::ListTabComments)
@@ -1085,14 +1090,112 @@ mod tests {
             calls[0].1,
             vec![
                 Value::Text("ORDER_ID".into()),
-                Value::Text("appuser".into()),
+                Value::Text("APPUSER".into()),
                 Value::Int(3),
             ]
         );
         let sql = DictQuery::FindColumnsByOwner.sql();
         assert!(sql.contains("\"COLUMN_NAME\" = :1"));
         assert!(sql.contains("\"OWNER\" = :2"));
-        assert!(sql.contains("FETCH FIRST :3 ROWS ONLY"));
+        assert!(sql.contains("ORDER BY \"OWNER\", \"TABLE_NAME\" FETCH FIRST :3 ROWS ONLY"));
+        drop(calls);
+
+        let dict = RecordingDict {
+            calls: Mutex::new(Vec::new()),
+        };
+        let page = list_tables_from(&dict, "company", "appuser", "%", 2).unwrap();
+        assert_eq!(page.items[0].owner, "APPUSER");
+        assert_eq!(
+            dict.calls.lock().unwrap()[0].1[0],
+            Value::Text("APPUSER".into())
+        );
+
+        assert_list_page(&[], &[], 2, &[], false);
+        assert_list_page(&["ONLY"], &[], 2, &["ONLY"], false);
+        assert_list_page(&["ZEBRA"], &["YAK"], 2, &["YAK", "ZEBRA"], false);
+        assert_list_page(
+            &["ZEBRA"],
+            &["YAK", "APPLE", "BANANA"],
+            2,
+            &["APPLE", "YAK"],
+            true,
+        );
+
+        assert_find_page(&["ONLY"], 2, &["ONLY"], false);
+        assert_find_page(&["BETA", "ALPHA"], 2, &["ALPHA", "BETA"], false);
+        assert_find_page(
+            &["ZEBRA", "YAK", "APPLE", "BANANA"],
+            2,
+            &["APPLE", "YAK"],
+            true,
+        );
+    }
+
+    fn object_row(name: &str, kind: &str) -> Vec<Value> {
+        vec![Value::Text(name.into()), Value::Text(kind.into())]
+    }
+
+    struct ScriptedDict {
+        tables: Vec<Vec<Value>>,
+        views: Vec<Vec<Value>>,
+        columns: Vec<Vec<Value>>,
+    }
+
+    impl Dictionary for ScriptedDict {
+        fn rows(&self, query: DictQuery, binds: &[Value]) -> Result<Vec<Vec<Value>>, DipperError> {
+            Ok(match query {
+                DictQuery::ListObjects => {
+                    if binds.get(1) == Some(&Value::Text("TABLE".into())) {
+                        self.tables.clone()
+                    } else {
+                        self.views.clone()
+                    }
+                }
+                DictQuery::FindColumns | DictQuery::FindColumnsByOwner => self.columns.clone(),
+                _ => Vec::new(),
+            })
+        }
+    }
+
+    fn assert_list_page(
+        tables: &[&str],
+        views: &[&str],
+        limit: usize,
+        names: &[&str],
+        truncated: bool,
+    ) {
+        let dict = ScriptedDict {
+            tables: tables
+                .iter()
+                .map(|name| object_row(name, "TABLE"))
+                .collect(),
+            views: views.iter().map(|name| object_row(name, "VIEW")).collect(),
+            columns: Vec::new(),
+        };
+        let page = list_tables_from(&dict, "company", "appuser", "%", limit).unwrap();
+        let got: Vec<&str> = page.items.iter().map(|item| item.table.as_str()).collect();
+        assert_eq!(
+            got, names,
+            "tables {tables:?} views {views:?} limit {limit}"
+        );
+        assert_eq!(page.truncated, truncated);
+        assert!(page.items.len() <= limit);
+    }
+
+    fn assert_find_page(tables: &[&str], limit: usize, names: &[&str], truncated: bool) {
+        let dict = ScriptedDict {
+            tables: Vec::new(),
+            views: Vec::new(),
+            columns: tables
+                .iter()
+                .map(|name| column_row("APPUSER", name))
+                .collect(),
+        };
+        let page = find_columns_from(&dict, "company", "order_id", Some("appuser"), limit).unwrap();
+        let got: Vec<&str> = page.items.iter().map(|item| item.table.as_str()).collect();
+        assert_eq!(got, names, "columns {tables:?} limit {limit}");
+        assert_eq!(page.truncated, truncated);
+        assert!(page.items.len() <= limit);
     }
 
     #[test]

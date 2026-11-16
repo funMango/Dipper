@@ -144,7 +144,7 @@ impl DictQuery {
                 r#"SELECT "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME" FROM "ALL_IND_COLUMNS" WHERE "TABLE_OWNER" = :1 AND "TABLE_NAME" = :2"#
             }
             DictQuery::ListObjects => {
-                r#"SELECT "OBJECT_NAME", "OBJECT_TYPE" FROM "ALL_OBJECTS" WHERE "OWNER" = :1 AND "OBJECT_TYPE" = :2 AND "OBJECT_NAME" LIKE :3 FETCH FIRST :4 ROWS ONLY"#
+                r#"SELECT "OBJECT_NAME", "OBJECT_TYPE" FROM "ALL_OBJECTS" WHERE "OWNER" = :1 AND "OBJECT_TYPE" = :2 AND "OBJECT_NAME" LIKE :3 ORDER BY "OBJECT_NAME" FETCH FIRST :4 ROWS ONLY"#
             }
             DictQuery::ListTabComments => {
                 r#"SELECT "TABLE_NAME", "COMMENTS" FROM "ALL_TAB_COMMENTS" WHERE "OWNER" = :1"#
@@ -153,10 +153,10 @@ impl DictQuery {
                 r#"SELECT "TABLE_NAME", "NUM_ROWS" FROM "ALL_TABLES" WHERE "OWNER" = :1"#
             }
             DictQuery::FindColumns => {
-                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1 FETCH FIRST :2 ROWS ONLY"#
+                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1 ORDER BY "OWNER", "TABLE_NAME" FETCH FIRST :2 ROWS ONLY"#
             }
             DictQuery::FindColumnsByOwner => {
-                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1 AND "OWNER" = :2 FETCH FIRST :3 ROWS ONLY"#
+                r#"SELECT "OWNER", "TABLE_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE" FROM "ALL_TAB_COLUMNS" WHERE "COLUMN_NAME" = :1 AND "OWNER" = :2 ORDER BY "OWNER", "TABLE_NAME" FETCH FIRST :3 ROWS ONLY"#
             }
             DictQuery::SqliteMaster => {
                 r#"SELECT "type", "sql" FROM "sqlite_master" WHERE "name" = ?"#
@@ -1411,7 +1411,9 @@ mod tests {
             let sql = query.sql();
             assert!(!sql.contains('\''), "{sql}");
             assert!(!sql.to_ascii_uppercase().contains(" JOIN "), "{sql}");
-            assert!(!sql.to_ascii_uppercase().contains(" ORDER BY "), "{sql}");
+            if sql.to_ascii_uppercase().contains(" ORDER BY ") {
+                assert!(sql.contains("ORDER BY \""), "{sql}");
+            }
             let upper = sql.to_ascii_uppercase();
             if upper.contains("FETCH") {
                 assert!(upper.contains("FETCH FIRST") && sql.contains(':'), "{sql}");

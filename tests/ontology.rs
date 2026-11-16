@@ -193,6 +193,86 @@ fn limit_outside_1_to_2000_is_a_usage_error() {
     }
 }
 
+fn assert_usage(config: &std::path::Path, args: &[&str], env: Option<(&str, &str)>, needle: &str) {
+    for json in [false, true] {
+        let mut command = common::dipper();
+        command.current_dir(config.parent().unwrap());
+        if let Some((key, value)) = env {
+            command.env(key, value);
+        }
+        command.args(["--config"]).arg(config).args(args);
+        if json {
+            command.args(["--format", "json"]);
+        }
+        let output = command.assert().code(2).get_output().clone();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("[usage]"), "{stderr}");
+        assert!(stderr.contains(needle), "{stderr}");
+        if json {
+            let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+            assert_eq!(doc["ok"], false);
+            assert_eq!(doc["exit_code"], 2);
+            assert_eq!(doc["error"]["code"], "usage");
+            assert_eq!(doc["error"]["retryable"], false);
+            assert!(doc["error"]["message"].as_str().unwrap().contains(needle));
+        } else {
+            assert!(stdout.trim().is_empty(), "{stdout}");
+        }
+    }
+}
+
+#[test]
+fn list_unknown_source_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        "[sources.sample]\nkind = \"sqlite\"\npath = \"source.db\"\n",
+    );
+    assert_usage(
+        &config,
+        &["ontology", "list", "missing"],
+        None,
+        "unknown source: missing",
+    );
+}
+
+#[test]
+fn find_unknown_source_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        "[sources.sample]\nkind = \"sqlite\"\npath = \"source.db\"\n",
+    );
+    assert_usage(
+        &config,
+        &["ontology", "find", "missing", "--column", "ID"],
+        None,
+        "unknown source: missing",
+    );
+}
+
+#[test]
+fn oracle_list_without_owner_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(
+        dir.path(),
+        r#"
+[sources.company]
+kind = "oracle"
+connect = "127.0.0.1:1/NOPE"
+user = "APPUSER"
+password = "${DIPPER_TEST_ORA_PASSWORD}"
+"#,
+    );
+    assert_usage(
+        &config,
+        &["ontology", "list", "company"],
+        Some(("DIPPER_TEST_ORA_PASSWORD", "not-a-real-secret")),
+        "--owner",
+    );
+}
+
 #[test]
 fn find_column_returns_exact_matches_ignoring_case() {
     let dir = tempfile::tempdir().unwrap();

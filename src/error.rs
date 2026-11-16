@@ -208,6 +208,7 @@ impl DipperError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::NotImplemented(_) | Self::UnknownDip(_) => 2,
+            Self::Source { kind, .. } if *kind == ErrorKind::Usage => 2,
             Self::ConfigNotFound(_)
             | Self::ConfigRead { .. }
             | Self::Config { .. }

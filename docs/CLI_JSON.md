@@ -28,7 +28,7 @@ Every `--format json` command uses the same `error` value: `null` on success, or
 | --- | --- |
 | 0 | The command finished. `ok` is true. |
 | 1 | Config, execution, or dip failure. `ok` is false. |
-| 2 | Usage, an unknown dip, or a command that is not implemented. Clap usage errors print no JSON. |
+| 2 | Usage, an unknown dip, or a command that is not implemented. Clap usage errors print no JSON. An ontology usage error, such as an unknown source or Oracle `list` without `--owner`, still writes JSON with `error.code` `usage` and `retryable` false. |
 
 ## `dip`
 
