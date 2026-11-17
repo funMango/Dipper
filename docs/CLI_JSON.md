@@ -118,6 +118,7 @@ Counts only. The document has no row values, key samples, connect strings, or da
 
 ```json
 {"schema_version":1,"command":"ontology.check_relation","ok":true,"exit_code":0,"source":"sample","from":{"owner":"main","table":"ORDERS","columns":["CROSS_ID"]},"to":{"owner":"main","table":"INTERSECTIONS","columns":["CROSS_ID"]},"source_non_null_rows":1200,"target_non_null_rows":80,"matched_rows":1195,"match_ratio":0.9958333333333333,"error":null}
+```
 
 ## `ontology list` and `ontology find`
 

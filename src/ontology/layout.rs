@@ -175,14 +175,23 @@ pub fn layout(graph: &Graph) -> Layout {
                 + 8.0
         })
         .collect();
+    let mut self_loop_pad = vec![0.0f32; slots.len()];
+    for edge in &graph.edges {
+        if edge.from == edge.to {
+            self_loop_pad[layer[index_of[&edge.from]]] = 32.0;
+        }
+    }
     let mut gap = vec![120.0f32; slots.len().saturating_sub(1)];
     for (index, edge) in graph.edges.iter().enumerate() {
-        if edge.from == edge.to {
-            continue;
-        }
-        let (left, _) = span(index, edge, &index_of, &forward, &layer);
-        if left < gap.len() {
-            gap[left] = gap[left].max(label_widths[index] + 48.0).max(120.0);
+        let gutter = if edge.from == edge.to {
+            layer[index_of[&edge.from]]
+        } else {
+            span(index, edge, &index_of, &forward, &layer).0
+        };
+        if gutter < gap.len() {
+            gap[gutter] = gap[gutter]
+                .max(label_widths[index] + 48.0 + self_loop_pad[gutter])
+                .max(120.0);
         }
     }
 
@@ -252,53 +261,44 @@ pub fn layout(graph: &Graph) -> Layout {
         }
     }
 
+    let label_rects = place_labels(
+        graph,
+        &label_lines,
+        &label_widths,
+        &node_rect,
+        &layer,
+        &index_of,
+        &layer_x,
+        &layer_w,
+        &self_loop_pad,
+    );
     let mut placed_edges = Vec::new();
     for (index, edge) in graph.edges.iter().enumerate() {
-        let lines = label_lines[index].clone();
         let points = if edge.from == edge.to {
             loop_points(&node_rect[&edge.from])
         } else {
             route_edge(
                 index,
                 edge,
-                &forward,
+                graph,
                 &slots,
                 &placed_slots,
                 &node_rect,
                 &layer,
                 &index_of,
+                &layer_x,
+                &layer_w,
+                &self_loop_pad,
+                &label_rects,
             )
-        };
-        let label_rect = if edge.from == edge.to {
-            let rect = node_rect[&edge.from];
-            Rect {
-                x: snap(rect.x + rect.w + 32.0),
-                y: snap(rect.y),
-                w: snap(label_widths[index]),
-                h: snap(lines.len() as f32 * 16.0),
-            }
-        } else {
-            let (left, _) = span(index, edge, &index_of, &forward, &layer);
-            let gutter_left = layer_x[left] + layer_w[left];
-            let gutter_right = layer_x[left + 1];
-            let width = label_widths[index];
-            let x = snap(gutter_left + (gutter_right - gutter_left - width).max(0.0) / 2.0);
-            let y = snap(points.first().map(|point| point.1).unwrap_or(40.0));
-            Rect {
-                x,
-                y,
-                w: snap(width),
-                h: snap(lines.len() as f32 * 16.0),
-            }
         };
         placed_edges.push(PlacedEdge {
             index,
             points,
-            label_rect,
-            label_lines: lines,
+            label_rect: label_rects[index],
+            label_lines: label_lines[index].clone(),
         });
     }
-    separate_labels(&mut placed_edges);
 
     let mut width = 32.0_f32;
     let mut height = 80.0_f32;
@@ -312,7 +312,7 @@ pub fn layout(graph: &Graph) -> Layout {
             height = height.max(point.1 + 24.0);
         }
         width = width.max(edge.label_rect.x + edge.label_rect.w + 16.0);
-        height = height.max(edge.label_rect.y + edge.label_rect.h + 16.0);
+        height = height.max(edge.label_rect.y + edge.label_rect.h + 48.0);
     }
     Layout {
         width: snap(width),
@@ -550,12 +550,16 @@ fn barycenter(
 fn route_edge(
     index: usize,
     edge: &Edge,
-    forward: &[bool],
+    graph: &Graph,
     slots: &[Vec<Slot>],
     placed: &[Vec<Rect>],
     node_rect: &BTreeMap<TableKey, Rect>,
     layer: &[usize],
     index_of: &BTreeMap<TableKey, usize>,
+    layer_x: &[f32],
+    layer_w: &[f32],
+    pad: &[f32],
+    labels: &[Rect],
 ) -> Vec<(f32, f32)> {
     let from_layer = layer[index_of[&edge.from]];
     let to_layer = layer[index_of[&edge.to]];
@@ -564,60 +568,82 @@ fn route_edge(
     let target = if left_to_right { &edge.to } else { &edge.from };
     let source_rect = node_rect[source];
     let target_rect = node_rect[target];
-    let source_y = port_y(
-        source, true, index, edge, slots, placed, node_rect, layer, index_of, forward,
-    );
-    let target_y = port_y(
-        target, false, index, edge, slots, placed, node_rect, layer, index_of, forward,
-    );
-    let mut points = vec![(snap(source_rect.x + source_rect.w), snap(source_y))];
+    let source_y = port_y(source, true, index, graph, node_rect, layer, index_of);
+    let target_y = port_y(target, false, index, graph, node_rect, layer, index_of);
     let left = from_layer.min(to_layer);
     let right = from_layer.max(to_layer);
-    if right == left {
-        points.push((snap(target_rect.x), snap(target_y)));
-    } else {
+    let line_y = snap(labels[index].y - 2.0);
+    let mut points = Vec::new();
+    push_point(
+        &mut points,
+        (snap(source_rect.x + source_rect.w), snap(source_y)),
+    );
+    let mut cursor_x = snap(source_rect.x + source_rect.w);
+    let mut cursor_y = snap(source_y);
+    if right > left {
         for layer_index in left..right {
-            let gutter_left = source_rect.x + source_rect.w;
-            let _ = gutter_left;
-            let mid = snap(
-                (placed_right(slots, placed, layer_index) + placed[layer_index + 1][0].x) / 2.0,
-            );
-            let y = if layer_index == left {
-                source_y
+            let gutter_left = snap(layer_x[layer_index] + layer_w[layer_index]);
+            let jog = snap(gutter_left + 4.0 + pad[layer_index]);
+            let lane = snap(layer_x[layer_index + 1] - 12.0);
+            let travel_y = if layer_index == left {
+                line_y
             } else {
-                target_y
+                snap(sky_y(layer_index, labels, graph, layer, index_of).unwrap_or(cursor_y))
             };
-            points.push((mid, snap(y)));
+            push_point(&mut points, (jog, cursor_y));
+            push_point(&mut points, (jog, travel_y));
+            push_point(&mut points, (lane, travel_y));
+            cursor_x = lane;
+            cursor_y = travel_y;
             if layer_index + 1 < right {
-                if let Some(dummy_y) = dummy_y(index, layer_index + 1, slots, placed) {
-                    points.push((snap(placed[layer_index + 1][0].x), snap(dummy_y)));
-                    points.push((
-                        snap(placed_right(slots, placed, layer_index + 1)),
-                        snap(dummy_y),
-                    ));
-                }
+                let through =
+                    snap(dummy_y(index, layer_index + 1, slots, placed).unwrap_or(target_y));
+                let exit = snap(layer_x[layer_index + 1] + layer_w[layer_index + 1]);
+                push_point(&mut points, (cursor_x, through));
+                push_point(&mut points, (exit, through));
+                cursor_x = exit;
+                cursor_y = through;
             }
         }
-        points.push((snap(target_rect.x), snap(target_y)));
     }
+    push_point(&mut points, (cursor_x, snap(target_y)));
+    push_point(&mut points, (snap(target_rect.x), snap(target_y)));
     if !left_to_right {
         points.reverse();
     }
     points
 }
 
-fn placed_right(slots: &[Vec<Slot>], placed: &[Vec<Rect>], layer_index: usize) -> f32 {
-    slots[layer_index]
-        .iter()
-        .zip(&placed[layer_index])
-        .map(|(slot, rect)| rect.x + slot.width.max(rect.w))
-        .fold(
-            placed[layer_index]
-                .first()
-                .map(|rect| rect.x)
-                .unwrap_or(0.0),
-            f32::max,
-        )
+fn sky_y(
+    gutter: usize,
+    labels: &[Rect],
+    graph: &Graph,
+    layer: &[usize],
+    index_of: &BTreeMap<TableKey, usize>,
+) -> Option<f32> {
+    let mut top = f32::INFINITY;
+    for (index, edge) in graph.edges.iter().enumerate() {
+        let edge_gutter = if edge.from == edge.to {
+            layer[index_of[&edge.from]]
+        } else {
+            let from_layer = layer[index_of[&edge.from]];
+            let to_layer = layer[index_of[&edge.to]];
+            from_layer.min(to_layer)
+        };
+        if edge_gutter == gutter {
+            top = top.min(labels[index].y);
+        }
+    }
+    top.is_finite().then_some(top - 6.0)
+}
+
+fn push_point(points: &mut Vec<(f32, f32)>, point: (f32, f32)) {
+    if let Some(previous) = points.last() {
+        if (previous.0 - point.0).abs() < 0.05 && (previous.1 - point.1).abs() < 0.05 {
+            return;
+        }
+    }
+    points.push(point);
 }
 
 fn dummy_y(
@@ -632,35 +658,44 @@ fn dummy_y(
         .find_map(|(slot, rect)| (slot.edge == Some(edge)).then_some(rect.y + rect.h / 2.0))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn port_y(
     key: &TableKey,
-    outgoing: bool,
+    right_side: bool,
     edge_index: usize,
-    _edge: &Edge,
-    slots: &[Vec<Slot>],
-    placed: &[Vec<Rect>],
+    graph: &Graph,
     node_rect: &BTreeMap<TableKey, Rect>,
     layer: &[usize],
     index_of: &BTreeMap<TableKey, usize>,
-    forward: &[bool],
 ) -> f32 {
     let rect = node_rect[key];
-    let node = index_of[key];
-    let mut rank = 0usize;
-    let mut count = 0usize;
-    for (index, edge) in index_of.iter().enumerate() {
-        let _ = (index, edge);
-    }
-    for (index, is_forward) in forward.iter().enumerate() {
-        let _ = (index, is_forward, node, outgoing, slots, placed, layer);
-        count += 1;
-        if index == edge_index {
-            rank = count;
+    let mut touching = Vec::new();
+    for (index, edge) in graph.edges.iter().enumerate() {
+        if edge.from == edge.to {
+            continue;
+        }
+        let from_layer = layer[index_of[&edge.from]];
+        let to_layer = layer[index_of[&edge.to]];
+        let on_this_side = if from_layer <= to_layer {
+            if right_side {
+                &edge.from
+            } else {
+                &edge.to
+            }
+        } else if right_side {
+            &edge.to
+        } else {
+            &edge.from
+        };
+        if on_this_side == key {
+            touching.push(index);
         }
     }
-    let count = count.max(1) as f32;
-    snap(rect.y + rect.h * rank as f32 / (count + 1.0))
+    let rank = touching
+        .iter()
+        .position(|index| *index == edge_index)
+        .unwrap_or(0);
+    let count = touching.len().max(1) as f32;
+    snap(rect.y + rect.h * (rank as f32 + 1.0) / (count + 1.0))
 }
 
 fn loop_points(rect: &Rect) -> Vec<(f32, f32)> {
@@ -671,34 +706,121 @@ fn loop_points(rect: &Rect) -> Vec<(f32, f32)> {
     vec![(x, y1), (bow, y1), (bow, y2), (x, y2)]
 }
 
-fn separate_labels(edges: &mut [PlacedEdge]) {
-    let mut order: Vec<usize> = (0..edges.len()).collect();
-    order.sort_by(|left, right| {
-        edges[*left]
-            .label_rect
-            .x
-            .partial_cmp(&edges[*right].label_rect.x)
-            .unwrap_or(std::cmp::Ordering::Equal)
+#[allow(clippy::too_many_arguments)]
+fn place_labels(
+    graph: &Graph,
+    label_lines: &[Vec<String>],
+    label_widths: &[f32],
+    node_rect: &BTreeMap<TableKey, Rect>,
+    layer: &[usize],
+    index_of: &BTreeMap<TableKey, usize>,
+    layer_x: &[f32],
+    layer_w: &[f32],
+    pad: &[f32],
+) -> Vec<Rect> {
+    let boxes: Vec<Rect> = node_rect.values().copied().collect();
+    let mut drafts = Vec::new();
+    for (index, edge) in graph.edges.iter().enumerate() {
+        let gutter = if edge.from == edge.to {
+            layer[index_of[&edge.from]]
+        } else {
+            let from_layer = layer[index_of[&edge.from]];
+            let to_layer = layer[index_of[&edge.to]];
+            from_layer.min(to_layer)
+        };
+        let gutter_left = snap(layer_x[gutter] + layer_w[gutter]);
+        let x = snap(gutter_left + 8.0 + pad[gutter]);
+        let ideal_y = if edge.from == edge.to {
+            let rect = node_rect[&edge.from];
+            snap(rect.y + rect.h * 0.35)
+        } else {
+            let from_layer = layer[index_of[&edge.from]];
+            let to_layer = layer[index_of[&edge.to]];
+            let left_key = if from_layer <= to_layer {
+                &edge.from
+            } else {
+                &edge.to
+            };
+            port_y(left_key, true, index, graph, node_rect, layer, index_of)
+        };
+        drafts.push((
+            gutter,
+            ideal_y,
+            index,
+            Rect {
+                x,
+                y: ideal_y,
+                w: snap(label_widths[index]),
+                h: snap(label_lines[index].len() as f32 * 16.0),
+            },
+        ));
+    }
+    drafts.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
             .then(
-                edges[*left]
-                    .label_rect
-                    .y
-                    .partial_cmp(&edges[*right].label_rect.y)
+                left.1
+                    .partial_cmp(&right.1)
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
-            .then(edges[*left].index.cmp(&edges[*right].index))
+            .then(left.2.cmp(&right.2))
     });
-    let mut previous: Option<Rect> = None;
-    for index in order {
-        if let Some(prev) = previous {
-            let same_column = (edges[index].label_rect.x - prev.x).abs() < 80.0;
-            let overlap = edges[index].label_rect.y < prev.y + prev.h + 14.0;
-            if same_column && overlap {
-                edges[index].label_rect.y = snap(prev.y + prev.h + 14.0);
+    let mut placed: Vec<Rect> = Vec::new();
+    let mut rects = vec![
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        graph.edges.len()
+    ];
+    for (_, ideal_y, index, mut rect) in drafts {
+        let mut y = ideal_y;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            if guard > 10_000 {
+                break;
+            }
+            rect.y = y;
+            let mut blocked_at = None;
+            for other in &placed {
+                if rects_conflict(rect, *other, 14.0) {
+                    let bottom = other.y + other.h + 14.0;
+                    blocked_at = Some(blocked_at.map_or(bottom, |value: f32| value.max(bottom)));
+                }
+            }
+            for other in &boxes {
+                if rects_conflict(rect, *other, 0.2) {
+                    let bottom = other.y + other.h + 0.2;
+                    blocked_at = Some(blocked_at.map_or(bottom, |value: f32| value.max(bottom)));
+                }
+            }
+            let Some(bottom) = blocked_at else {
+                break;
+            };
+            let next = snap(bottom);
+            if next <= y {
+                y = snap(y + 14.0);
+            } else {
+                y = next;
             }
         }
-        previous = Some(edges[index].label_rect);
+        rect.y = y;
+        placed.push(rect);
+        rects[index] = rect;
     }
+    rects
+}
+
+fn rects_conflict(left: Rect, right: Rect, gap: f32) -> bool {
+    let x = left.x.max(right.x);
+    let far_x = (left.x + left.w).min(right.x + right.w);
+    if far_x - x <= 0.2 {
+        return false;
+    }
+    left.y < right.y + right.h + gap && right.y < left.y + left.h + gap
 }
 
 pub(crate) fn edge_label_lines(edge: &Edge) -> Vec<String> {
@@ -939,15 +1061,34 @@ mod tests {
     fn layout_parallel_edges_get_distinct_ports() {
         let graph = scale();
         let placed = layout(&graph);
+        let node = placed
+            .nodes
+            .iter()
+            .find(|node| node.key.table == "A")
+            .unwrap();
+        let right = snap(node.rect.x + node.rect.w);
         let mut ports = Vec::new();
         for edge in &placed.edges {
-            let ends = &graph.edges[edge.index];
-            if ends.from.table == "A" && ends.to.table == "B" {
-                ports.push(edge.points[0].1);
+            if let Some(point) = edge
+                .points
+                .iter()
+                .find(|point| (point.0 - right).abs() < 0.05)
+            {
+                ports.push(point.1);
             }
         }
-        assert!(ports.len() >= 2);
-        assert!((ports[0] - ports[1]).abs() > 0.2);
+        assert!(ports.len() >= 2, "{ports:?}");
+        let step = node.rect.h / (ports.len() as f32 + 1.0);
+        for (index, port) in ports.iter().enumerate() {
+            let expected = snap(node.rect.y + step * (index as f32 + 1.0));
+            assert!(
+                (port - expected).abs() < 0.2,
+                "port {index} at {port} expected {expected} step {step}"
+            );
+        }
+        for pair in ports.windows(2) {
+            assert!((pair[1] - pair[0] - step).abs() < 0.2);
+        }
     }
 
     #[test]
@@ -971,5 +1112,263 @@ mod tests {
         assert!(text_width("가", 12.0) > text_width("A", 12.0));
         assert!((text_width("A", 12.0) - 7.2).abs() < 0.01);
         assert!((text_width("가", 12.0) - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn layout_random_labels_stay_clear_of_labels_boxes_and_edges() {
+        let mut label_label = 0usize;
+        let mut label_box = 0usize;
+        let mut crossed = 0usize;
+        let graphs = std::iter::once(seed10_repro()).chain((0..80).map(random_graph));
+        for (seed, graph) in graphs.enumerate() {
+            let placed = layout(&graph);
+            let (labels, boxes, crosses) = overlap_counts(&placed);
+            label_label += labels;
+            label_box += boxes;
+            crossed += crosses;
+            assert_eq!(
+                (labels, boxes, crosses),
+                (0, 0, 0),
+                "seed {seed} label-label {labels} label-box {boxes} crossings {crosses}"
+            );
+        }
+        assert_eq!((label_label, label_box, crossed), (0, 0, 0));
+    }
+
+    fn overlap_counts(placed: &Layout) -> (usize, usize, usize) {
+        let mut label_label = 0;
+        let mut label_box = 0;
+        let mut crossed = 0;
+        for (left_index, left) in placed.edges.iter().enumerate() {
+            for node in &placed.nodes {
+                if overlap(left.label_rect, node.rect) {
+                    label_box += 1;
+                }
+            }
+            for right in placed.edges.iter().skip(left_index + 1) {
+                if overlap(left.label_rect, right.label_rect) {
+                    label_label += 1;
+                }
+            }
+        }
+        for edge in &placed.edges {
+            for label in &placed.edges {
+                for pair in edge.points.windows(2) {
+                    if segment_crosses_rect(pair[0], pair[1], label.label_rect) {
+                        crossed += 1;
+                    }
+                }
+            }
+        }
+        (label_label, label_box, crossed)
+    }
+
+    fn segment_crosses_rect(start: (f32, f32), end: (f32, f32), rect: Rect) -> bool {
+        let x0 = rect.x + 0.51;
+        let y0 = rect.y + 0.51;
+        let x1 = rect.x + rect.w - 0.51;
+        let y1 = rect.y + rect.h - 0.51;
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let mut t0 = 0.0f32;
+        let mut t1 = 1.0f32;
+        for (p, q) in [
+            (-dx, start.0 - x0),
+            (dx, x1 - start.0),
+            (-dy, start.1 - y0),
+            (dy, y1 - start.1),
+        ] {
+            if p.abs() < 0.0001 {
+                if q < 0.0 {
+                    return false;
+                }
+            } else {
+                let t = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(t);
+                } else {
+                    t1 = t1.min(t);
+                }
+                if t0 > t1 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn seed10_repro() -> Graph {
+        let mut graph = Graph::default();
+        for index in 0..12 {
+            let name = format!("T{index:02}");
+            let comment = match index {
+                1 | 3 | 10 => Some(format!("설명 {name}")),
+                2 | 5 | 11 => Some("comment <&> \"q\"".to_string()),
+                _ => None,
+            };
+            let key = key(&name);
+            graph.nodes.insert(
+                key.clone(),
+                Node {
+                    title: key.title(),
+                    comment,
+                    primary_key: vec!["ID".to_string()],
+                    kind: NodeKind::Pulled,
+                    key,
+                },
+            );
+        }
+        graph.edges.push(Edge {
+            from: key("T02"),
+            to: key("T00"),
+            columns: vec!["LONG_COLUMN_NAME_ONE".to_string(), "ID".to_string()],
+            target_columns: vec!["LONG_COLUMN_NAME_ONE".to_string(), "ID".to_string()],
+            source: EdgeSource::Relation {
+                status: RelationStatus::Draft,
+            },
+            kind: RelationKind::Reference,
+            condition: Some("GROUP_CD='KXXXX'".to_string()),
+            label: None,
+        });
+        graph.edges.push(Edge {
+            from: key("T06"),
+            to: key("T07"),
+            columns: vec!["KIND_CD".to_string()],
+            target_columns: vec!["KIND_CD".to_string()],
+            source: EdgeSource::Relation {
+                status: RelationStatus::Draft,
+            },
+            kind: RelationKind::Reference,
+            condition: None,
+            label: None,
+        });
+        graph.edges.push(Edge {
+            from: key("T06"),
+            to: key("T06"),
+            columns: vec!["GROUP_CD".to_string(), "KIND_CD".to_string()],
+            target_columns: vec!["GROUP_CD".to_string(), "KIND_CD".to_string()],
+            source: EdgeSource::Relation {
+                status: RelationStatus::Draft,
+            },
+            kind: RelationKind::Rollup,
+            condition: None,
+            label: Some("합계 = 전 방향 SUM".to_string()),
+        });
+        graph
+    }
+
+    fn random_graph(seed: u64) -> Graph {
+        let mut rng = Rng(seed.wrapping_add(1));
+        let tables = rng.below(10) + 3;
+        let relations = rng.below(28) + 3;
+        let columns = [
+            "ID",
+            "SITE_NO",
+            "ARM_NO",
+            "KIND_CD",
+            "GROUP_CD",
+            "LONG_COLUMN_NAME_ONE",
+            "OBS_TM",
+            "X",
+        ];
+        let mut graph = Graph::default();
+        for index in 0..tables {
+            let name = format!("T{index:02}");
+            let key = key(&name);
+            let comment = if rng.below(2) == 0 {
+                Some(format!("설명 {name}"))
+            } else {
+                None
+            };
+            graph.nodes.insert(
+                key.clone(),
+                Node {
+                    title: key.title(),
+                    comment,
+                    primary_key: vec!["ID".to_string()],
+                    kind: NodeKind::Pulled,
+                    key,
+                },
+            );
+        }
+        let ghost = key("GHOST");
+        graph.nodes.insert(
+            ghost.clone(),
+            Node {
+                title: ghost.title(),
+                comment: None,
+                primary_key: Vec::new(),
+                kind: NodeKind::Missing,
+                key: ghost,
+            },
+        );
+        for _ in 0..relations {
+            let from = format!("T{:02}", rng.below(tables));
+            let to = if rng.below(8) == 0 {
+                "GHOST".to_string()
+            } else {
+                format!("T{:02}", rng.below(tables))
+            };
+            let width = rng.below(2) + 1;
+            let mut columns_from = Vec::new();
+            let mut columns_to = Vec::new();
+            for _ in 0..width {
+                columns_from.push(columns[rng.below(columns.len())].to_string());
+                let target = if rng.below(2) == 0 {
+                    columns_from.last().unwrap().clone()
+                } else {
+                    columns[rng.below(columns.len())].to_string()
+                };
+                columns_to.push(target);
+            }
+            let rollup = rng.below(5) == 0;
+            graph.edges.push(Edge {
+                from: key(&from),
+                to: key(&to),
+                columns: columns_from,
+                target_columns: columns_to,
+                source: EdgeSource::Relation {
+                    status: if rng.below(2) == 0 {
+                        RelationStatus::Draft
+                    } else {
+                        RelationStatus::Confirmed
+                    },
+                },
+                kind: if rollup {
+                    RelationKind::Rollup
+                } else {
+                    RelationKind::Reference
+                },
+                condition: if rng.below(3) == 0 {
+                    Some(format!("GROUP_CD='K{}'", "X".repeat(rng.below(21))))
+                } else {
+                    None
+                },
+                label: if rollup {
+                    Some("합계 = 전 방향 SUM".to_string())
+                } else {
+                    None
+                },
+            });
+        }
+        graph
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, limit: usize) -> usize {
+            (self.next() % limit as u64) as usize
+        }
     }
 }

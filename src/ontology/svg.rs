@@ -101,6 +101,10 @@ pub fn to_svg(graph: &Graph, layout: &Layout, title: &str) -> String {
                 &format!("<polygon points=\"{polygon}\" fill=\"{color}\" stroke=\"{color}\"/>"),
             );
         }
+        line(&mut out, 1, "</g>");
+    }
+    line(&mut out, 1, "<g id=\"labels\">");
+    for placed in &layout.edges {
         line(
             &mut out,
             2,
@@ -120,8 +124,8 @@ pub fn to_svg(graph: &Graph, layout: &Layout, title: &str) -> String {
             &placed.label_lines,
             false,
         );
-        line(&mut out, 1, "</g>");
     }
+    line(&mut out, 1, "</g>");
     write_legend(&mut out, layout.height);
     out.push_str("</svg>\n");
     out
