@@ -126,7 +126,7 @@ pub fn to_svg(graph: &Graph, layout: &Layout, title: &str) -> String {
         );
     }
     line(&mut out, 1, "</g>");
-    write_legend(&mut out, layout.height);
+    write_legend(&mut out, &layout.legend);
     out.push_str("</svg>\n");
     out
 }
@@ -190,8 +190,8 @@ fn write_text(out: &mut String, depth: usize, x: f32, y: f32, lines: &[String], 
     line(out, depth, &body);
 }
 
-fn write_legend(out: &mut String, height: f32) {
-    let y = snap_local(height - 28.0);
+fn write_legend(out: &mut String, legend: &crate::ontology::layout::Rect) {
+    let y = snap_local(legend.y + 4.0);
     let y_text = num(y);
     let text_y = num(y + 4.0);
     line(out, 1, "<g id=\"legend\">");
