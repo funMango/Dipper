@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "relations": [
+    {
+      "columns": [
+        "GROUP_CD"
+      ],
+      "target_owner": "main",
+      "target_table": "CODE_GROUP",
+      "target_columns": [
+        "GROUP_CD"
+      ],
+      "status": "confirmed",
+      "evidence": "group code"
+    }
+  ]
+}

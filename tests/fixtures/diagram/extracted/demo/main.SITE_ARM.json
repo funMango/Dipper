@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "source": "demo",
+  "owner": "main",
+  "table": "SITE_ARM",
+  "extracted_at": "2026-11-17T00:00:00Z",
+  "object_type": "TABLE",
+  "table_comment": "arm of a site",
+  "primary_key": [
+    "SITE_NO",
+    "ARM_NO"
+  ],
+  "time_column": null,
+  "columns": [
+    {
+      "name": "SITE_NO",
+      "data_type": "TEXT",
+      "data_length": null,
+      "data_precision": null,
+      "data_scale": null,
+      "nullable": false,
+      "virtual": false,
+      "db_comment": null,
+      "meaning": null,
+      "meaning_status": "unknown",
+      "unit": null,
+      "unit_status": "unknown"
+    },
+    {
+      "name": "ARM_NO",
+      "data_type": "TEXT",
+      "data_length": null,
+      "data_precision": null,
+      "data_scale": null,
+      "nullable": false,
+      "virtual": false,
+      "db_comment": null,
+      "meaning": null,
+      "meaning_status": "unknown",
+      "unit": null,
+      "unit_status": "unknown"
+    }
+  ],
+  "foreign_keys": [
+    {
+      "name": "FK_SITE",
+      "columns": [
+        "SITE_NO"
+      ],
+      "target_owner": "main",
+      "target_table": "SITE",
+      "target_columns": [
+        "SITE_NO"
+      ]
+    }
+  ]
+}

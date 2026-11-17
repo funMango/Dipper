@@ -39,6 +39,13 @@ Do not guess table names and `pull` until one works. When a foreign key is missi
    Change `status` to `"confirmed"` only after they accept that item.
 5. Run `dipper ontology validate`, then `dipper ontology render`.
    Render writes Obsidian notes under `ontology/md/`, including `[[owner.table]]` links and `_index.md`.
+6. Draw the relationship diagram with `dipper ontology diagram <source> [--root OWNER.TABLE] [--depth N] [--group OWNER.TABLE] [--confirmed-only] [--mmd]`.
+   It reads only local JSON and writes `ontology/diagrams/<source>/<name>.svg`.
+   Confirmed relations and foreign keys are solid lines. Draft relations are dashed.
+   Optional `kind` is `reference` or `rollup`. A rollup requires `label`.
+   Optional `condition` and `label` are short notes shown on the line.
+   Do not fill `condition` or `label` from row values. Take them only from a database comment or a person's explanation.
+   Do not change `kind`, `condition`, or `label` on a `confirmed` relation unless the person said to.
 
 ## Period load
 
@@ -55,6 +62,6 @@ If `error.retryable` is true, wait 5 seconds and run that command once more. If 
 ## Never do this
 
 - Do not put source row values, DuckDB row samples, passwords, connect strings, or database usernames into the model context, the conversation, a file, or an overlay. Config examples use only the variable names `DIPPER_ORA_USER` and `DIPPER_ORA_PASSWORD`.
-- Do not bypass `GuardedSelect`, `READ_ONLY`, or binds, and do not connect with another driver. The allowed commands are `check`, `ontology list`, `ontology find`, `ontology pull`, `ontology validate`, `ontology render`, `ontology check-relation`, and `dip`.
+- Do not bypass `GuardedSelect`, `READ_ONLY`, or binds, and do not connect with another driver. The allowed commands are `check`, `ontology list`, `ontology find`, `ontology pull`, `ontology validate`, `ontology render`, `ontology diagram`, `ontology check-relation`, and `dip`.
 - Do not add `DIPPER_AI_*` settings, API keys, or cost limits to the Dipper source.
 - Do not merge a pull request unless the person explicitly approves it.

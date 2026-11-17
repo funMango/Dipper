@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "relations": [
+    {
+      "columns": [
+        "SITE_NO",
+        "ARM_NO"
+      ],
+      "target_owner": "main",
+      "target_table": "SITE_ARM",
+      "target_columns": [
+        "SITE_NO",
+        "ARM_NO"
+      ],
+      "status": "confirmed",
+      "evidence": "same key"
+    },
+    {
+      "columns": [
+        "KIND_CD"
+      ],
+      "target_owner": "main",
+      "target_table": "CODE_ITEM",
+      "target_columns": [
+        "ITEM_CD"
+      ],
+      "status": "confirmed",
+      "evidence": "kind code",
+      "condition": "GROUP_CD='KIND'"
+    }
+  ]
+}

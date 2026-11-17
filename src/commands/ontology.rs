@@ -517,10 +517,143 @@ fn write_doc(out: &mut dyn Write, doc: &impl Serialize) -> Result<(), DipperErro
     writeln!(out, "{text}").map_err(write_err)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn diagram(
+    source: &str,
+    roots: &[String],
+    depth: u8,
+    groups: &[String],
+    name: Option<&str>,
+    confirmed_only: bool,
+    mmd: bool,
+    format: crate::cli::OutputFormat,
+    out: &mut dyn Write,
+) -> Result<(), DipperError> {
+    let root = std::path::Path::new(".");
+    let parsed_roots = match crate::ontology::parse_patterns(roots) {
+        Ok(patterns) => patterns,
+        Err(err) => return finish_diagram(format, out, source, roots, depth, name, err),
+    };
+    let parsed_groups = match crate::ontology::parse_patterns(groups) {
+        Ok(patterns) => patterns,
+        Err(err) => return finish_diagram(format, out, source, roots, depth, name, err),
+    };
+    let diagram_name = name
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::ontology::default_name(&parsed_roots));
+    let request = crate::ontology::DiagramRequest {
+        source: source.to_string(),
+        selection: crate::ontology::Selection {
+            roots: parsed_roots,
+            depth,
+            groups: parsed_groups,
+            confirmed_only,
+        },
+        name: diagram_name,
+        mmd,
+    };
+    match crate::ontology::diagram(root, &request) {
+        Ok(report) => {
+            for warning in &report.warnings {
+                if warning == "large_diagram" {
+                    eprintln!("diagram is large; try --root or --group");
+                }
+            }
+            if format == crate::cli::OutputFormat::Json {
+                write_doc(
+                    out,
+                    &diagram_body(source, roots, depth, &request.name, &report, None),
+                )?;
+            } else {
+                for file in &report.files {
+                    writeln!(out, "{file}").map_err(write_err)?;
+                }
+                let relations =
+                    report.edges.confirmed + report.edges.draft + report.edges.foreign_key;
+                writeln!(
+                    out,
+                    "diagram: {} tables, {relations} relations ({} confirmed, {} draft, {} foreign keys)",
+                    report.tables, report.edges.confirmed, report.edges.draft, report.edges.foreign_key
+                )
+                .map_err(write_err)?;
+            }
+            Ok(())
+        }
+        Err(err) => finish_diagram(format, out, source, roots, depth, name, err),
+    }
+}
+
+fn finish_diagram(
+    format: crate::cli::OutputFormat,
+    out: &mut dyn Write,
+    source: &str,
+    roots: &[String],
+    depth: u8,
+    name: Option<&str>,
+    err: DipperError,
+) -> Result<(), DipperError> {
+    if format == crate::cli::OutputFormat::Json {
+        let empty = crate::ontology::DiagramReport {
+            files: Vec::new(),
+            tables: 0,
+            missing_tables: 0,
+            edges: crate::ontology::EdgeCounts {
+                confirmed: 0,
+                draft: 0,
+                foreign_key: 0,
+            },
+            warnings: Vec::new(),
+        };
+        write_doc(
+            out,
+            &diagram_body(source, roots, depth, name.unwrap_or(""), &empty, Some(&err)),
+        )?;
+    }
+    Err(err)
+}
+
+fn diagram_body<'a>(
+    source: &'a str,
+    roots: &'a [String],
+    depth: u8,
+    name: &'a str,
+    report: &'a crate::ontology::DiagramReport,
+    error: Option<&DipperError>,
+) -> DiagramDocument<'a> {
+    DiagramDocument {
+        command: "ontology.diagram",
+        source,
+        roots,
+        depth,
+        name,
+        files: &report.files,
+        tables: report.tables,
+        missing_tables: report.missing_tables,
+        edges: &report.edges,
+        warnings: &report.warnings,
+        error: error.map(crate::output::ErrorBody::from_error),
+    }
+}
+
 pub fn validate_docs(root: &Path, out: &mut dyn Write) -> Result<(), DipperError> {
     validate(root)?;
     writeln!(out, "ontology ok").map_err(write_err)?;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct DiagramDocument<'a> {
+    command: &'static str,
+    source: &'a str,
+    roots: &'a [String],
+    depth: u8,
+    name: &'a str,
+    files: &'a [String],
+    tables: usize,
+    missing_tables: usize,
+    edges: &'a crate::ontology::EdgeCounts,
+    warnings: &'a [String],
+    error: Option<crate::output::ErrorBody>,
 }
 
 #[derive(Serialize)]

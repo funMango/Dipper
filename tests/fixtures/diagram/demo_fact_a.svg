@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="962.6" height="458.0" viewBox="0 0 962.6 458.0">
+  <text x="16.0" y="24.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="13" font-weight="700" fill="#111827">demo · main.FACT_A_* · tables 7 · relations 9</text>
+  <g id="node-main.CODE_GROUP">
+    <rect x="773.6" y="137.0" width="141.0" height="70.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#111827"/>
+    <text x="785.6" y="155.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.CODE_GROUP<tspan x="785.6" dy="18">code group</tspan><tspan x="785.6" dy="18">PK: GROUP_CD</tspan></text>
+  </g>
+  <g id="node-main.CODE_ITEM">
+    <rect x="484.8" y="52.0" width="133.2" height="70.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#111827"/>
+    <text x="496.8" y="70.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.CODE_ITEM<tspan x="496.8" dy="18">code item</tspan><tspan x="496.8" dy="18">PK: ITEM_CD</tspan></text>
+  </g>
+  <g id="node-main.FACT_A_1D">
+    <rect x="16.0" y="137.0" width="160.8" height="70.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#111827"/>
+    <text x="28.0" y="155.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.FACT_A_1D<tspan x="28.0" dy="18">daily facts</tspan><tspan x="28.0" dy="18">PK: SITE_NO, ARM_NO</tspan></text>
+  </g>
+  <g id="node-main.FACT_A_1H">
+    <rect x="16.0" y="231.0" width="160.8" height="70.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#111827"/>
+    <text x="28.0" y="249.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.FACT_A_1H<tspan x="28.0" dy="18">hourly facts</tspan><tspan x="28.0" dy="18">PK: SITE_NO, ARM_NO</tspan></text>
+  </g>
+  <g id="node-main.GHOST">
+    <rect x="484.8" y="240.0" width="110.4" height="52.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#9ca3af" stroke-dasharray="4 3"/>
+    <text x="496.8" y="258.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.GHOST<tspan x="496.8" dy="18">(not pulled)</tspan></text>
+  </g>
+  <g id="node-main.SITE">
+    <rect x="773.6" y="231.0" width="104.0" height="70.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#111827"/>
+    <text x="785.6" y="249.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.SITE<tspan x="785.6" dy="18">A&lt;B&gt;&amp;&quot;C&quot;&apos;</tspan><tspan x="785.6" dy="18">PK: SITE_NO</tspan></text>
+  </g>
+  <g id="node-main.SITE_ARM">
+    <rect x="484.8" y="146.0" width="160.8" height="70.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#111827"/>
+    <text x="496.8" y="164.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.SITE_ARM<tspan x="496.8" dy="18">arm of a site</tspan><tspan x="496.8" dy="18">PK: SITE_NO, ARM_NO</tspan></text>
+  </g>
+  <g id="node-main.TOTAL_A_1H">
+    <rect x="484.8" y="316.0" width="141.0" height="70.0" rx="6" fill="#ffffff" stroke-width="1.5" stroke="#111827"/>
+    <text x="496.8" y="334.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="700" fill="#111827">main.TOTAL_A_1H<tspan x="496.8" dy="18">hourly total</tspan><tspan x="496.8" dy="18">PK: SITE_NO</tspan></text>
+  </g>
+  <g id="edge-0" data-status="confirmed" data-kind="reference">
+    <path d="M 618.0 59.0 L 709.6 59.0 L 773.6 144.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <polygon points="773.6,144.0 766.0,139.7 771.6,135.5" fill="#374151" stroke="#374151"/>
+    <rect x="676.8" y="232.0" width="65.6" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="680.8" y="244.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">GROUP_CD</text>
+  </g>
+  <g id="edge-1" data-status="confirmed" data-kind="reference">
+    <path d="M 176.8 151.0 L 330.8 151.0 L 484.8 66.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <polygon points="484.8,66.0 479.5,72.9 476.1,66.8" fill="#374151" stroke="#374151"/>
+    <rect x="200.8" y="151.0" width="260.0" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="204.8" y="163.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">KIND_CD → ITEM_CD (GROUP_CD=&apos;KIND&apos;)</text>
+  </g>
+  <g id="edge-2" data-status="confirmed" data-kind="reference">
+    <path d="M 176.8 158.0 L 330.8 158.0 L 484.8 167.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <polygon points="484.8,167.0 476.6,170.0 477.0,163.0" fill="#374151" stroke="#374151"/>
+    <rect x="276.4" y="335.0" width="108.8" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="280.4" y="347.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">SITE_NO,ARM_NO</text>
+  </g>
+  <g id="edge-3" data-status="confirmed" data-kind="reference">
+    <path d="M 176.8 259.0 L 330.8 259.0 L 484.8 80.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <polygon points="484.8,80.0 482.2,88.3 476.9,83.8" fill="#374151" stroke="#374151"/>
+    <rect x="200.8" y="259.0" width="260.0" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="204.8" y="271.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">KIND_CD → ITEM_CD (GROUP_CD=&apos;KIND&apos;)</text>
+  </g>
+  <g id="edge-4" data-status="confirmed" data-kind="reference">
+    <path d="M 176.8 266.0 L 330.8 266.0 L 484.8 266.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <polygon points="484.8,266.0 476.8,269.5 476.8,262.5" fill="#374151" stroke="#374151"/>
+    <rect x="301.6" y="395.0" width="58.4" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="305.6" y="407.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">SITE_NO</text>
+  </g>
+  <g id="edge-5" data-status="confirmed" data-kind="reference">
+    <path d="M 176.8 273.0 L 330.8 273.0 L 484.8 188.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <polygon points="484.8,188.0 479.5,194.9 476.1,188.8" fill="#374151" stroke="#374151"/>
+    <rect x="276.4" y="365.0" width="108.8" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="280.4" y="377.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">SITE_NO,ARM_NO</text>
+  </g>
+  <g id="edge-6" data-status="confirmed" data-kind="rollup">
+    <path d="M 176.8 280.0 L 330.8 280.0 L 484.8 365.0" fill="none" stroke="#b45309" stroke-width="2"/>
+    <polygon points="484.8,365.0 476.1,364.2 479.5,358.1" fill="#b45309" stroke="#b45309"/>
+    <rect x="268.0" y="289.0" width="125.6" height="32.0" fill="#ffffff" stroke="none"/>
+    <text x="272.0" y="301.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">SITE_NO<tspan x="272.0" dy="18">합계 = 전 방향 SUM</tspan></text>
+  </g>
+  <g id="edge-7" data-status="foreign_key" data-kind="reference">
+    <path d="M 645.6 202.0 L 709.6 202.0 L 773.6 287.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <polygon points="773.6,287.0 766.0,282.7 771.6,278.5" fill="#374151" stroke="#374151"/>
+    <rect x="669.6" y="202.0" width="80.0" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="673.6" y="214.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">FK SITE_NO</text>
+  </g>
+  <g id="edge-8" data-status="draft" data-kind="reference">
+    <path d="M 625.8 379.0 L 709.6 379.0 L 773.6 294.0" fill="none" stroke="#374151" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <polygon points="773.6,294.0 771.6,302.5 766.0,298.3" fill="#374151" stroke="#374151"/>
+    <rect x="680.4" y="379.0" width="58.4" height="16.0" fill="#ffffff" stroke="none"/>
+    <text x="684.4" y="391.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" font-weight="400" fill="#111827">SITE_NO</text>
+  </g>
+  <g id="legend">
+    <path d="M 16.0 430.0 L 40.0 430.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <text x="44.0" y="434.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" fill="#111827">confirmed</text>
+    <path d="M 140.0 430.0 L 164.0 430.0" fill="none" stroke="#374151" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="168.0" y="434.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" fill="#111827">draft</text>
+    <path d="M 220.0 430.0 L 244.0 430.0" fill="none" stroke="#374151" stroke-width="1.5"/>
+    <text x="248.0" y="434.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" fill="#111827">FK</text>
+    <path d="M 280.0 430.0 L 304.0 430.0" fill="none" stroke="#b45309" stroke-width="2"/>
+    <text x="308.0" y="434.0" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif" font-size="12" fill="#111827">rollup</text>
+  </g>
+</svg>
