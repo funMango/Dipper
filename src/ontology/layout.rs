@@ -181,18 +181,20 @@ pub fn layout(graph: &Graph) -> Layout {
             self_loop_pad[layer[index_of[&edge.from]]] = 32.0;
         }
     }
+    let gutter_edges = gutter_members(graph, &layer, &index_of, slots.len());
     let mut gap = vec![120.0f32; slots.len().saturating_sub(1)];
-    for (index, edge) in graph.edges.iter().enumerate() {
-        let gutter = if edge.from == edge.to {
-            layer[index_of[&edge.from]]
-        } else {
-            span(index, edge, &index_of, &forward, &layer).0
-        };
-        if gutter < gap.len() {
-            gap[gutter] = gap[gutter]
-                .max(label_widths[index] + 48.0 + self_loop_pad[gutter])
-                .max(120.0);
+    for (gutter, members) in gutter_edges.iter().enumerate() {
+        if gutter >= gap.len() {
+            continue;
         }
+        let label_w =
+            label_width_in_gutter(gutter, members, &label_widths, graph, &layer, &index_of);
+        let n = members.len() as f32;
+        let pad = self_loop_pad[gutter];
+        gap[gutter] = gap[gutter]
+            .max(label_w + 48.0 + pad)
+            .max(pad + label_w + 8.0 * n + 28.0)
+            .max(120.0);
     }
 
     let mut layer_x = vec![16.0f32; slots.len()];
@@ -271,6 +273,7 @@ pub fn layout(graph: &Graph) -> Layout {
         &layer_x,
         &layer_w,
         &self_loop_pad,
+        &gutter_edges,
     );
     let mut placed_edges = Vec::new();
     for (index, edge) in graph.edges.iter().enumerate() {
@@ -290,6 +293,8 @@ pub fn layout(graph: &Graph) -> Layout {
                 &layer_w,
                 &self_loop_pad,
                 &label_rects,
+                &gutter_edges,
+                &label_widths,
             )
         };
         placed_edges.push(PlacedEdge {
@@ -560,6 +565,8 @@ fn route_edge(
     layer_w: &[f32],
     pad: &[f32],
     labels: &[Rect],
+    gutter_edges: &[Vec<usize>],
+    label_widths: &[f32],
 ) -> Vec<(f32, f32)> {
     let from_layer = layer[index_of[&edge.from]];
     let to_layer = layer[index_of[&edge.to]];
@@ -572,7 +579,7 @@ fn route_edge(
     let target_y = port_y(target, false, index, graph, node_rect, layer, index_of);
     let left = from_layer.min(to_layer);
     let right = from_layer.max(to_layer);
-    let line_y = snap(labels[index].y - 2.0);
+    let lane_y = edge_lane_y(index, labels, node_rect, placed);
     let mut points = Vec::new();
     push_point(
         &mut points,
@@ -583,21 +590,34 @@ fn route_edge(
     if right > left {
         for layer_index in left..right {
             let gutter_left = snap(layer_x[layer_index] + layer_w[layer_index]);
-            let jog = snap(gutter_left + 4.0 + pad[layer_index]);
-            let lane = snap(layer_x[layer_index + 1] - 12.0);
-            let travel_y = if layer_index == left {
-                line_y
-            } else {
-                snap(sky_y(layer_index, labels, graph, layer, index_of).unwrap_or(cursor_y))
-            };
+            let jog = jog_x(
+                gutter_left,
+                pad[layer_index],
+                index,
+                &gutter_edges[layer_index],
+            );
+            let lane = lane_x(
+                gutter_left,
+                pad[layer_index],
+                index,
+                layer_index,
+                &gutter_edges[layer_index],
+                label_widths,
+                graph,
+                layer,
+                index_of,
+            );
+            let travel_y = lane_y;
             push_point(&mut points, (jog, cursor_y));
             push_point(&mut points, (jog, travel_y));
             push_point(&mut points, (lane, travel_y));
             cursor_x = lane;
             cursor_y = travel_y;
             if layer_index + 1 < right {
-                let through =
-                    snap(dummy_y(index, layer_index + 1, slots, placed).unwrap_or(target_y));
+                let through = snap(
+                    dummy_y(index, layer_index + 1, slots, placed)
+                        .unwrap_or(target_y + 4.0 * (index as f32 + 1.0)),
+                );
                 let exit = snap(layer_x[layer_index + 1] + layer_w[layer_index + 1]);
                 push_point(&mut points, (cursor_x, through));
                 push_point(&mut points, (exit, through));
@@ -614,27 +634,115 @@ fn route_edge(
     points
 }
 
-fn sky_y(
-    gutter: usize,
-    labels: &[Rect],
+fn gutter_members(
     graph: &Graph,
     layer: &[usize],
     index_of: &BTreeMap<TableKey, usize>,
-) -> Option<f32> {
-    let mut top = f32::INFINITY;
+    layers: usize,
+) -> Vec<Vec<usize>> {
+    let mut members = vec![Vec::new(); layers];
     for (index, edge) in graph.edges.iter().enumerate() {
-        let edge_gutter = if edge.from == edge.to {
-            layer[index_of[&edge.from]]
-        } else {
-            let from_layer = layer[index_of[&edge.from]];
-            let to_layer = layer[index_of[&edge.to]];
-            from_layer.min(to_layer)
+        let Some((left, right)) = edge_span(edge, layer, index_of) else {
+            continue;
         };
-        if edge_gutter == gutter {
-            top = top.min(labels[index].y);
+        let mut gutter = left;
+        while gutter < right && gutter < members.len() {
+            members[gutter].push(index);
+            gutter += 1;
         }
     }
-    top.is_finite().then_some(top - 6.0)
+    members
+}
+
+fn edge_span(
+    edge: &Edge,
+    layer: &[usize],
+    index_of: &BTreeMap<TableKey, usize>,
+) -> Option<(usize, usize)> {
+    if edge.from == edge.to {
+        return None;
+    }
+    let from = layer[index_of[&edge.from]];
+    let to = layer[index_of[&edge.to]];
+    Some((from.min(to), from.max(to)))
+}
+
+fn rank_in(members: &[usize], edge_index: usize) -> usize {
+    members
+        .iter()
+        .position(|index| *index == edge_index)
+        .unwrap_or(0)
+}
+
+fn label_width_in_gutter(
+    gutter: usize,
+    members: &[usize],
+    label_widths: &[f32],
+    graph: &Graph,
+    layer: &[usize],
+    index_of: &BTreeMap<TableKey, usize>,
+) -> f32 {
+    let mut width = members
+        .iter()
+        .filter_map(|index| {
+            let (left, _) = edge_span(&graph.edges[*index], layer, index_of)?;
+            (left == gutter).then_some(label_widths[*index])
+        })
+        .fold(0.0, f32::max);
+    for (index, edge) in graph.edges.iter().enumerate() {
+        if edge.from == edge.to && layer[index_of[&edge.from]] == gutter {
+            width = width.max(label_widths[index]);
+        }
+    }
+    width
+}
+
+fn jog_x(gutter_left: f32, pad: f32, edge_index: usize, members: &[usize]) -> f32 {
+    let rank = rank_in(members, edge_index);
+    snap(gutter_left + pad + 4.0 * (rank as f32 + 1.0))
+}
+
+fn label_column_x(gutter_left: f32, pad: f32, members: usize) -> f32 {
+    snap(gutter_left + pad + 4.0 * (members as f32 + 1.0) + 8.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lane_x(
+    gutter_left: f32,
+    pad: f32,
+    edge_index: usize,
+    gutter: usize,
+    members: &[usize],
+    label_widths: &[f32],
+    graph: &Graph,
+    layer: &[usize],
+    index_of: &BTreeMap<TableKey, usize>,
+) -> f32 {
+    let label_w = label_width_in_gutter(gutter, members, label_widths, graph, layer, index_of);
+    let origin = label_column_x(gutter_left, pad, members.len()) + label_w + 8.0;
+    let rank = rank_in(members, edge_index);
+    snap(origin + 4.0 * (rank as f32 + 1.0))
+}
+
+fn edge_lane_y(
+    edge_index: usize,
+    labels: &[Rect],
+    node_rect: &BTreeMap<TableKey, Rect>,
+    placed: &[Vec<Rect>],
+) -> f32 {
+    let mut floor = 0.0f32;
+    for rect in labels {
+        floor = floor.max(rect.y + rect.h);
+    }
+    for rect in node_rect.values() {
+        floor = floor.max(rect.y + rect.h);
+    }
+    for column in placed {
+        for rect in column {
+            floor = floor.max(rect.y + rect.h);
+        }
+    }
+    snap(floor + 16.0 + edge_index as f32 * 4.0)
 }
 
 fn push_point(points: &mut Vec<(f32, f32)>, point: (f32, f32)) {
@@ -717,6 +825,7 @@ fn place_labels(
     layer_x: &[f32],
     layer_w: &[f32],
     pad: &[f32],
+    gutter_edges: &[Vec<usize>],
 ) -> Vec<Rect> {
     let boxes: Vec<Rect> = node_rect.values().copied().collect();
     let mut drafts = Vec::new();
@@ -729,7 +838,11 @@ fn place_labels(
             from_layer.min(to_layer)
         };
         let gutter_left = snap(layer_x[gutter] + layer_w[gutter]);
-        let x = snap(gutter_left + 8.0 + pad[gutter]);
+        let x = label_column_x(
+            gutter_left,
+            pad[gutter],
+            gutter_edges.get(gutter).map(Vec::len).unwrap_or(0),
+        );
         let ideal_y = if edge.from == edge.to {
             let rect = node_rect[&edge.from];
             snap(rect.y + rect.h * 0.35)
@@ -1103,7 +1216,22 @@ mod tests {
             let ends = &graph.edges[edge.index];
             ends.from.table == "I" && ends.to.table == "A"
         });
-        assert!(loop_edge.unwrap().points.len() >= 4);
+        let loop_edge = loop_edge.unwrap();
+        assert!(loop_edge.points.len() >= 4);
+        let node = placed
+            .nodes
+            .iter()
+            .find(|node| node.key.table == "I")
+            .unwrap();
+        let bow = loop_edge
+            .points
+            .iter()
+            .map(|point| point.0)
+            .fold(node.rect.x + node.rect.w, f32::max);
+        assert!(
+            (bow - (node.rect.x + node.rect.w) - 28.0).abs() < 0.2,
+            "self-loop bow {bow}"
+        );
         assert!(cycle.unwrap().points.len() >= 2);
     }
 
@@ -1119,20 +1247,78 @@ mod tests {
         let mut label_label = 0usize;
         let mut label_box = 0usize;
         let mut crossed = 0usize;
+        let mut collinear = 0usize;
         let graphs = std::iter::once(seed10_repro()).chain((0..80).map(random_graph));
         for (seed, graph) in graphs.enumerate() {
             let placed = layout(&graph);
             let (labels, boxes, crosses) = overlap_counts(&placed);
+            let shared = collinear_without_shared_endpoint(&graph, &placed);
             label_label += labels;
             label_box += boxes;
             crossed += crosses;
+            collinear += shared;
             assert_eq!(
-                (labels, boxes, crosses),
-                (0, 0, 0),
-                "seed {seed} label-label {labels} label-box {boxes} crossings {crosses}"
+                (labels, boxes, crosses, shared),
+                (0, 0, 0, 0),
+                "seed {seed} label-label {labels} label-box {boxes} crossings {crosses} collinear {shared}"
             );
         }
-        assert_eq!((label_label, label_box, crossed), (0, 0, 0));
+        assert_eq!((label_label, label_box, crossed, collinear), (0, 0, 0, 0));
+    }
+
+    fn collinear_without_shared_endpoint(graph: &Graph, placed: &Layout) -> usize {
+        let mut count = 0;
+        for left_index in 0..placed.edges.len() {
+            for right_index in (left_index + 1)..placed.edges.len() {
+                let left = &placed.edges[left_index];
+                let right = &placed.edges[right_index];
+                let left_ends = &graph.edges[left.index];
+                let right_ends = &graph.edges[right.index];
+                if shares_endpoint(left_ends, right_ends) {
+                    continue;
+                }
+                for left_seg in left.points.windows(2) {
+                    for right_seg in right.points.windows(2) {
+                        if collinear_overlap(left_seg[0], left_seg[1], right_seg[0], right_seg[1]) {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    fn shares_endpoint(left: &Edge, right: &Edge) -> bool {
+        left.from == right.from
+            || left.from == right.to
+            || left.to == right.from
+            || left.to == right.to
+    }
+
+    fn collinear_overlap(
+        start: (f32, f32),
+        end: (f32, f32),
+        other: (f32, f32),
+        last: (f32, f32),
+    ) -> bool {
+        if (start.0 - end.0).abs() < 0.05
+            && (other.0 - last.0).abs() < 0.05
+            && (start.0 - other.0).abs() < 1.0
+        {
+            let low = start.1.min(end.1).max(other.1.min(last.1));
+            let high = start.1.max(end.1).min(other.1.max(last.1));
+            return high - low > 2.0;
+        }
+        if (start.1 - end.1).abs() < 0.05
+            && (other.1 - last.1).abs() < 0.05
+            && (start.1 - other.1).abs() < 1.0
+        {
+            let low = start.0.min(end.0).max(other.0.min(last.0));
+            let high = start.0.max(end.0).min(other.0.max(last.0));
+            return high - low > 2.0;
+        }
+        false
     }
 
     fn overlap_counts(placed: &Layout) -> (usize, usize, usize) {
