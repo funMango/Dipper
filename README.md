@@ -42,7 +42,7 @@ Dipper is in early development. There is no installable release yet. Installatio
 
 Oracle sources need Instant Client. The setup steps are in [docs/ORACLE_SETUP.md](docs/ORACLE_SETUP.md). `dipper check --env-only` reports whether that client can be loaded.
 
-An external assistant can follow [skills/dipper/SKILL.md](skills/dipper/SKILL.md) to pull an ontology, record draft meanings and relationships, render Obsidian notes, and run a period dip. It calls the Dipper CLI only.
+An external assistant can follow [skills/dipper/SKILL.md](skills/dipper/SKILL.md) to pull an ontology, record draft meanings and relationships, render Obsidian notes, draw an SVG relationship diagram, and run a period dip. It calls the Dipper CLI only.
 
 ## Contributing
 

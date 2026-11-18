@@ -1,0 +1,18 @@
+flowchart LR
+n0["main.CODE_GROUP"]
+n1["main.CODE_ITEM"]
+n2["main.FACT_A_1D"]
+n3["main.FACT_A_1H"]
+n4["main.GHOST"]
+n5["main.SITE"]
+n6["main.SITE_ARM"]
+n7["main.TOTAL_A_1H"]
+n1 -->|"GROUP_CD"| n0
+n2 -->|"KIND_CD → ITEM_CD (GROUP_CD='KIND')"| n1
+n2 -->|"SITE_NO,ARM_NO"| n6
+n3 -->|"KIND_CD → ITEM_CD (GROUP_CD='KIND')"| n1
+n3 -->|"SITE_NO"| n4
+n3 -->|"SITE_NO,ARM_NO"| n6
+n3 ==>|"SITE_NO<br>합계 = 전 방향 SUM"| n7
+n6 -->|"FK SITE_NO"| n5
+n7 -.->|"SITE_NO"| n5

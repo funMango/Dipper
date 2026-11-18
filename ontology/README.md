@@ -6,6 +6,7 @@ It does not create, change, or delete `overlay/`.
 `overlay/<source>/<owner>.<table>.json` holds human meaning and unit notes, plus estimated `relations`.
 It cannot replace declared `foreign_keys`. `dipper ontology validate` rejects that field.
 `dipper ontology render` writes `md/<source>/<owner>.<table>.md` and `md/<source>/_index.md` from the extracted document plus that overlay.
+`dipper ontology diagram <source>` writes `diagrams/<source>/<name>.svg` from the same JSON. It does not open a database. Pass `--mmd` to also write a Mermaid file.
 Foreign keys and relations become Obsidian links of the form `[[owner.table]]`.
 `dipper ontology validate` rejects a document that does not match the schema.
 

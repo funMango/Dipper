@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": "demo",
+  "owner": "main",
+  "table": "CODE_GROUP",
+  "extracted_at": "2026-11-17T00:00:00Z",
+  "object_type": "TABLE",
+  "table_comment": "code group",
+  "primary_key": [
+    "GROUP_CD"
+  ],
+  "time_column": null,
+  "columns": [
+    {
+      "name": "GROUP_CD",
+      "data_type": "TEXT",
+      "data_length": null,
+      "data_precision": null,
+      "data_scale": null,
+      "nullable": false,
+      "virtual": false,
+      "db_comment": null,
+      "meaning": null,
+      "meaning_status": "unknown",
+      "unit": null,
+      "unit_status": "unknown"
+    }
+  ],
+  "foreign_keys": []
+}

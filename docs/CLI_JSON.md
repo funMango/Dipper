@@ -1,6 +1,6 @@
 # JSON output
 
-`dipper dip`, `dipper check`, `dipper ontology pull`, `dipper ontology list`, `dipper ontology find`, and `dipper ontology check-relation` accept `--format json`. Omitting `--format` keeps the existing table or path list. The flag is not global: `render` and `validate` do not take it.
+`dipper dip`, `dipper check`, `dipper ontology pull`, `dipper ontology list`, `dipper ontology find`, `dipper ontology check-relation`, and `dipper ontology diagram` accept `--format json`. Omitting `--format` keeps the existing table or path list. The flag is not global: `render` and `validate` do not take it.
 
 `--format json` writes one JSON document to stdout and a final newline. Progress, `preview:`, `note:`, `ignored filter:`, `nothing to fetch:`, `--log-sql`, and `dipper:` stay on stderr. A clap usage error (exit 2), including an unknown format such as `--format xml` or `ontology list`/`find` `--limit` outside 1..=2000, writes no JSON. `error.code` and `error_code` are the kind captured before the message is redacted, so a withheld message stays `client_missing` or `object_not_found` instead of becoming `other`.
 
@@ -118,6 +118,7 @@ Counts only. The document has no row values, key samples, connect strings, or da
 
 ```json
 {"schema_version":1,"command":"ontology.check_relation","ok":true,"exit_code":0,"source":"sample","from":{"owner":"main","table":"ORDERS","columns":["CROSS_ID"]},"to":{"owner":"main","table":"INTERSECTIONS","columns":["CROSS_ID"]},"source_non_null_rows":1200,"target_non_null_rows":80,"matched_rows":1195,"match_ratio":0.9958333333333333,"error":null}
+```
 
 ## `ontology list` and `ontology find`
 
@@ -137,4 +138,12 @@ Dictionary only. The documents contain no row values.
 | `env` | `executable`, `config`, `oracle_feature`, and `instant_client`. Each has `name`, `status` (`ok`, `warn`, `fail`, or `skipped`), `detail`, and `fix`. |
 | `sources` | One object per configured source when the environment did not fail and `--env-only` was not set. `status` is `ok` or `fail`. `error_code` is an error code or null. `findings` are messages. |
 | `error` | An error object when the command will exit 1, otherwise null. |
-```
+
+## `ontology diagram`
+
+`dipper ontology diagram <source>` reads `ontology/extracted` and `ontology/overlay` only. It does not read `--config` and it does not open a database. `--format json` writes:
+
+`command`, `source`, `roots`, `depth`, `name`, `files` (relative paths using `/`), `tables`, `missing_tables`, `edges` (`confirmed`, `draft`, `foreign_key`), `warnings`, and `error`.
+
+A missing source or an unmatched `--root` exits 1 with `object_not_found`. An unsafe `--name`, a pattern without a dot, or `--depth` outside 0..=5 exits 2 with `usage`. Clap rejects an out-of-range `--depth` before JSON is written.
+

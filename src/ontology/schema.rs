@@ -17,11 +17,25 @@ pub enum FieldStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationStatus {
     Draft,
     Confirmed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationKind {
+    #[default]
+    Reference,
+    Rollup,
+}
+
+impl RelationKind {
+    fn is_reference(&self) -> bool {
+        matches!(self, Self::Reference)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,6 +106,12 @@ pub struct Relation {
     pub evidence: Option<String>,
     #[serde(default)]
     pub overlap: Option<OverlapSummary>,
+    #[serde(default, skip_serializing_if = "RelationKind::is_reference")]
+    pub kind: RelationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +307,30 @@ fn check_relation_shape(relation: &Relation) -> Result<(), String> {
             return Err("draft relation requires evidence".to_string());
         }
     }
+    if relation.kind == RelationKind::Rollup && relation.label.as_deref().is_none() {
+        return Err("rollup relation requires label".to_string());
+    }
+    if let Some(condition) = &relation.condition {
+        check_relation_note("condition", condition)?;
+    }
+    if let Some(label) = &relation.label {
+        check_relation_note("label", label)?;
+    }
+    Ok(())
+}
+
+fn check_relation_note(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("relation {field} must not be blank"));
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return Err(format!(
+            "relation {field} must not contain control characters"
+        ));
+    }
+    if value.chars().count() > 120 {
+        return Err(format!("relation {field} must be at most 120 characters"));
+    }
     Ok(())
 }
 
@@ -308,7 +352,7 @@ pub fn validate(root: &Path) -> Result<(), DipperError> {
     let overlay = root.join("ontology/overlay");
     let mut errors = Vec::new();
     if extracted.is_dir() {
-        for path in json_files(&extracted) {
+        for path in crate::ontology::load::json_files(&extracted) {
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Err(err) = parse_doc(&text) {
@@ -320,7 +364,7 @@ pub fn validate(root: &Path) -> Result<(), DipperError> {
         }
     }
     if overlay.is_dir() {
-        for path in json_files(&overlay) {
+        for path in crate::ontology::load::json_files(&overlay) {
             let text = match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(err) => {
@@ -359,30 +403,7 @@ pub fn validate(root: &Path) -> Result<(), DipperError> {
 }
 
 fn overlay_to_extracted(root: &Path, overlay: &Path) -> std::path::PathBuf {
-    let relative = overlay
-        .strip_prefix(root.join("ontology/overlay"))
-        .unwrap_or(overlay);
-    root.join("ontology/extracted").join(relative)
-}
-
-fn json_files(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
+    crate::ontology::load::overlay_to_extracted(root, overlay)
 }
 
 pub fn ontology_error(message: impl Into<String>) -> DipperError {
@@ -463,6 +484,9 @@ mod tests {
             status: RelationStatus::Draft,
             evidence: Some("same name".to_string()),
             overlap: None,
+            kind: RelationKind::Reference,
+            condition: None,
+            label: None,
         });
         let text = serde_json::to_string(&doc).unwrap();
         parse_doc(&text).unwrap();
@@ -480,6 +504,114 @@ mod tests {
         doc.relations[0].columns = vec!["MISSING".to_string()];
         let err = doc.check().unwrap_err();
         assert!(err.contains("MISSING"), "{err}");
+    }
+
+    #[test]
+    fn relation_kind_condition_label_round_trip() {
+        let mut doc = extracted();
+        doc.relations.push(Relation {
+            columns: vec!["QTY".to_string()],
+            target_owner: "main".to_string(),
+            target_table: "OTHER".to_string(),
+            target_columns: vec!["QTY".to_string()],
+            status: RelationStatus::Confirmed,
+            evidence: None,
+            overlap: None,
+            kind: RelationKind::Rollup,
+            condition: Some("GROUP_CD='KIND'".to_string()),
+            label: Some("합계 = 전 방향 SUM".to_string()),
+        });
+        let text = serde_json::to_string(&doc).unwrap();
+        let parsed = parse_doc(&text).unwrap();
+        assert_eq!(parsed.relations[0].kind, RelationKind::Rollup);
+        assert_eq!(
+            parsed.relations[0].condition.as_deref(),
+            Some("GROUP_CD='KIND'")
+        );
+        assert_eq!(
+            parsed.relations[0].label.as_deref(),
+            Some("합계 = 전 방향 SUM")
+        );
+    }
+
+    #[test]
+    fn rollup_relation_requires_label() {
+        let mut doc = extracted();
+        doc.relations.push(Relation {
+            columns: vec!["QTY".to_string()],
+            target_owner: "main".to_string(),
+            target_table: "OTHER".to_string(),
+            target_columns: vec!["QTY".to_string()],
+            status: RelationStatus::Confirmed,
+            evidence: None,
+            overlap: None,
+            kind: RelationKind::Rollup,
+            condition: None,
+            label: None,
+        });
+        let err = doc.check().unwrap_err();
+        assert!(err.contains("label"), "{err}");
+    }
+
+    #[test]
+    fn condition_and_label_reject_control_chars_blank_and_over_120_chars() {
+        for field in ["condition", "label"] {
+            for bad in ["   ", "line\nbreak", "tab\there", &"x".repeat(121)] {
+                let mut doc = extracted();
+                let mut relation = Relation {
+                    columns: vec!["QTY".to_string()],
+                    target_owner: "main".to_string(),
+                    target_table: "OTHER".to_string(),
+                    target_columns: vec!["QTY".to_string()],
+                    status: RelationStatus::Confirmed,
+                    evidence: None,
+                    overlap: None,
+                    kind: RelationKind::Reference,
+                    condition: None,
+                    label: None,
+                };
+                if field == "condition" {
+                    relation.condition = Some(bad.to_string());
+                } else {
+                    relation.label = Some(bad.to_string());
+                }
+                doc.relations.push(relation);
+                assert!(doc.check().is_err(), "{field} accepted {bad:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_overlay_without_kind_condition_label_still_validates() {
+        let overlay = parse_overlay(
+            r#"{"version":1,"relations":[{"columns":["QTY"],"target_owner":"main","target_table":"OTHER","target_columns":["QTY"],"status":"confirmed"}]}"#,
+        )
+        .unwrap();
+        let merged = crate::ontology::merge::merge(&extracted(), &overlay).unwrap();
+        assert_eq!(merged.relations[0].kind, RelationKind::Reference);
+        assert!(merged.relations[0].condition.is_none());
+        assert!(merged.relations[0].label.is_none());
+    }
+
+    #[test]
+    fn pull_output_omits_default_kind_condition_label() {
+        let mut doc = extracted();
+        doc.relations.push(Relation {
+            columns: vec!["QTY".to_string()],
+            target_owner: "main".to_string(),
+            target_table: "OTHER".to_string(),
+            target_columns: vec!["QTY".to_string()],
+            status: RelationStatus::Confirmed,
+            evidence: None,
+            overlap: None,
+            kind: RelationKind::Reference,
+            condition: None,
+            label: None,
+        });
+        let text = serde_json::to_string(&doc).unwrap();
+        assert!(!text.contains("\"kind\""), "{text}");
+        assert!(!text.contains("\"condition\""), "{text}");
+        assert!(!text.contains("\"label\""), "{text}");
     }
 
     fn status_name(status: FieldStatus) -> &'static str {

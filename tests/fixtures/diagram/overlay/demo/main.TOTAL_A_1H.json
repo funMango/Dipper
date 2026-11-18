@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "relations": [
+    {
+      "columns": [
+        "SITE_NO"
+      ],
+      "target_owner": "main",
+      "target_table": "SITE",
+      "target_columns": [
+        "SITE_NO"
+      ],
+      "status": "draft",
+      "evidence": "name match"
+    }
+  ]
+}

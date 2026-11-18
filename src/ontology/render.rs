@@ -14,10 +14,10 @@ pub fn render(root: &Path) -> Result<Vec<PathBuf>, DipperError> {
     let mut written = Vec::new();
     let mut hubs: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
-    for path in json_files(&extracted) {
+    for path in crate::ontology::load::json_files(&extracted) {
         let text = std::fs::read_to_string(&path).map_err(|err| ontology_error(err.to_string()))?;
         let doc = parse_doc(&text).map_err(ontology_error)?;
-        let overlay_path = extracted_to_overlay(root, &path);
+        let overlay_path = crate::ontology::load::extracted_to_overlay(root, &path);
         let merged = if overlay_path.is_file() {
             let overlay_text = std::fs::read_to_string(&overlay_path)
                 .map_err(|err| ontology_error(err.to_string()))?;
@@ -182,13 +182,6 @@ fn inline(text: &str) -> String {
     out
 }
 
-fn extracted_to_overlay(root: &Path, extracted: &Path) -> PathBuf {
-    let relative = extracted
-        .strip_prefix(root.join("ontology/extracted"))
-        .unwrap_or(extracted);
-    root.join("ontology/overlay").join(relative)
-}
-
 fn extracted_to_md(root: &Path, extracted: &Path) -> PathBuf {
     let relative = extracted
         .strip_prefix(root.join("ontology/extracted"))
@@ -196,26 +189,6 @@ fn extracted_to_md(root: &Path, extracted: &Path) -> PathBuf {
     let mut path = root.join("ontology/md").join(relative);
     path.set_extension("md");
     path
-}
-
-fn json_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
 }
 
 #[cfg(test)]
@@ -252,6 +225,9 @@ mod tests {
                 status: RelationStatus::Draft,
                 evidence: Some("see [[secret]]\nnext".to_string()),
                 overlap: None,
+                kind: crate::ontology::schema::RelationKind::Reference,
+                condition: None,
+                label: None,
             }],
             columns: vec![OntologyColumn {
                 name: "COL|1".to_string(),

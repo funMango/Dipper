@@ -65,6 +65,32 @@ pub enum OntologyCommand {
     },
     /// Write `ontology/md` from extracted JSON plus any overlay.
     Render,
+    /// Draw an SVG relationship diagram from ontology JSON. Does not open a database.
+    Diagram {
+        /// Source directory name under `ontology/extracted`.
+        source: String,
+        /// Root `OWNER.TABLE` glob. Repeat to add roots. Neighbors follow `--depth`.
+        #[arg(long)]
+        root: Vec<String>,
+        /// How many relationship steps to include around each root. Default 2, range 0..=5.
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=5))]
+        depth: u8,
+        /// Fold matching tables into one box, for example `main.FACT_A_*`.
+        #[arg(long)]
+        group: Vec<String>,
+        /// Output file name without an extension. Default is `all` or the first root.
+        #[arg(long)]
+        name: Option<String>,
+        /// Hide draft relations.
+        #[arg(long)]
+        confirmed_only: bool,
+        /// Also write a Mermaid `.mmd` file.
+        #[arg(long)]
+        mmd: bool,
+        /// stdout format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
     /// Reject an overlay or extracted document that does not match the schema.
     Validate,
     /// List tables and views from the dictionary. Does not read table rows.
@@ -259,6 +285,26 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
                 OntologyCommand::Render => {
                     crate::commands::ontology::render_docs(std::path::Path::new("."), &mut handle)
                 }
+                OntologyCommand::Diagram {
+                    source,
+                    root,
+                    depth,
+                    group,
+                    name,
+                    confirmed_only,
+                    mmd,
+                    format,
+                } => crate::commands::ontology::diagram(
+                    &source,
+                    &root,
+                    depth,
+                    &group,
+                    name.as_deref(),
+                    confirmed_only,
+                    mmd,
+                    format,
+                    &mut handle,
+                ),
                 OntologyCommand::Validate => {
                     crate::commands::ontology::validate_docs(std::path::Path::new("."), &mut handle)
                 }
