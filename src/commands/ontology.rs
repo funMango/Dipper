@@ -1,4 +1,4 @@
-//! `dipper ontology` reads a dictionary and writes local JSON and Markdown.
+//! `dipper ontology` reads a dictionary and writes local JSON.
 
 use std::io::Write;
 use std::path::Path;
@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::cli::OutputFormat;
 use crate::error::DipperError;
-use crate::ontology::{self, render, split_table, validate};
+use crate::ontology::{self, split_table, validate};
 use crate::pipeline::{DefaultOpener, SourceOpener};
 
 pub fn pull(
@@ -248,13 +248,95 @@ fn run_check(
     })
 }
 
-pub fn render_docs(root: &Path, out: &mut dyn Write) -> Result<(), DipperError> {
-    let paths = render(root)?;
-    for path in &paths {
-        writeln!(out, "{}", path.display()).map_err(write_err)?;
+pub fn show(
+    root: &Path,
+    source: &str,
+    table: Option<&str>,
+    format: crate::cli::OutputFormat,
+    out: &mut dyn Write,
+) -> Result<(), DipperError> {
+    match show_docs(root, source, table) {
+        Ok(docs) => {
+            if format == crate::cli::OutputFormat::Json {
+                write_doc(out, &show_body(source, &docs, None))?;
+            } else {
+                for doc in &docs {
+                    let confirmed = doc
+                        .relations
+                        .iter()
+                        .filter(|relation| {
+                            relation.status == crate::ontology::RelationStatus::Confirmed
+                        })
+                        .count();
+                    let draft = doc.relations.len() - confirmed;
+                    writeln!(
+                        out,
+                        "{}.{}  columns {}  relations {confirmed} confirmed / {draft} draft  foreign_keys {}",
+                        doc.owner,
+                        doc.table,
+                        doc.columns.len(),
+                        doc.foreign_keys.len()
+                    )
+                    .map_err(write_err)?;
+                }
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if format == crate::cli::OutputFormat::Json {
+                write_doc(out, &show_body(source, &[], Some(&err)))?;
+            }
+            Err(err)
+        }
     }
-    writeln!(out, "{} ontology files rendered", paths.len()).map_err(write_err)?;
-    Ok(())
+}
+
+fn show_docs(
+    root: &Path,
+    source: &str,
+    table: Option<&str>,
+) -> Result<Vec<crate::ontology::OntologyDoc>, DipperError> {
+    let mut docs: Vec<_> = ontology::load_source(root, source)?
+        .into_iter()
+        .map(|loaded| loaded.doc)
+        .collect();
+    if let Some(table) = table {
+        let (owner, name) = split_table(
+            table,
+            &crate::config::SourceConfig::Sqlite {
+                path: std::path::PathBuf::from("unused.sqlite"),
+                max_session_minutes: 1,
+            },
+        )?;
+        docs.retain(|doc| {
+            doc.owner.eq_ignore_ascii_case(&owner) && doc.table.eq_ignore_ascii_case(&name)
+        });
+        if docs.is_empty() {
+            return Err(not_found(format!("no table matches {table}")));
+        }
+    }
+    Ok(docs)
+}
+
+fn show_body<'a>(
+    source: &'a str,
+    tables: &'a [crate::ontology::OntologyDoc],
+    error: Option<&'a DipperError>,
+) -> ShowDocument<'a> {
+    ShowDocument {
+        command: "ontology.show",
+        source,
+        tables,
+        error: error.map(crate::output::ErrorBody::from_error),
+    }
+}
+
+fn not_found(message: impl Into<String>) -> DipperError {
+    DipperError::Source {
+        source_name: "ontology".to_string(),
+        kind: crate::error::ErrorKind::ObjectNotFound,
+        message: message.into(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -639,6 +721,14 @@ pub fn validate_docs(root: &Path, out: &mut dyn Write) -> Result<(), DipperError
     validate(root)?;
     writeln!(out, "ontology ok").map_err(write_err)?;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct ShowDocument<'a> {
+    command: &'static str,
+    source: &'a str,
+    tables: &'a [crate::ontology::OntologyDoc],
+    error: Option<crate::output::ErrorBody>,
 }
 
 #[derive(Serialize)]

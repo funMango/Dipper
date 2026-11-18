@@ -1,6 +1,6 @@
 # JSON output
 
-`dipper dip`, `dipper check`, `dipper ontology pull`, `dipper ontology list`, `dipper ontology find`, `dipper ontology check-relation`, and `dipper ontology diagram` accept `--format json`. Omitting `--format` keeps the existing table or path list. The flag is not global: `render` and `validate` do not take it.
+`dipper dip`, `dipper check`, `dipper ontology pull`, `dipper ontology list`, `dipper ontology find`, `dipper ontology check-relation`, `dipper ontology diagram`, and `dipper ontology show` accept `--format json`. Omitting `--format` keeps the existing table or path list. The flag is not global: `validate` does not take it.
 
 `--format json` writes one JSON document to stdout and a final newline. Progress, `preview:`, `note:`, `ignored filter:`, `nothing to fetch:`, `--log-sql`, and `dipper:` stay on stderr. A clap usage error (exit 2), including an unknown format such as `--format xml` or `ontology list`/`find` `--limit` outside 1..=2000, writes no JSON. `error.code` and `error_code` are the kind captured before the message is redacted, so a withheld message stays `client_missing` or `object_not_found` instead of becoming `other`.
 
@@ -146,4 +146,10 @@ Dictionary only. The documents contain no row values.
 `command`, `source`, `roots`, `depth`, `name`, `files` (relative paths using `/`), `tables`, `missing_tables`, `edges` (`confirmed`, `draft`, `foreign_key`), `warnings`, and `error`.
 
 A missing source or an unmatched `--root` exits 1 with `object_not_found`. An unsafe `--name`, a pattern without a dot, or `--depth` outside 0..=5 exits 2 with `usage`. Clap rejects an out-of-range `--depth` before JSON is written.
+
+## `ontology show`
+
+`dipper ontology show <source> [--table OWNER.TABLE]` reads `ontology/extracted` and `ontology/overlay` only. It does not read `--config`, open a database, or write a file. `--format json` writes `command` (`ontology.show`), `source`, `tables` (the merged documents), and `error`.
+
+A name without a dot uses owner `main`. A missing source or a `--table` that matches nothing exits 1 with `object_not_found`. The table format prints one line per table: `OWNER.TABLE  columns N  relations C confirmed / D draft  foreign_keys F`.
 

@@ -74,7 +74,7 @@ jobs:
           grep -q '^alwaysApply: false$' .cursor/rules/dipper.mdc
           grep -q 'skills/dipper/SKILL.md' .cursor/rules/dipper.mdc
           grep -q 'skills/dipper/SKILL.md' AGENTS.md
-          for phrase in "ontology pull" "check-relation" "ontology validate" "ontology render" "ontology diagram" "DIPPER_ORA_USER" "DIPPER_ORA_PASSWORD" "DIPPER_AI_" "GuardedSelect"; do
+          for phrase in "ontology pull" "check-relation" "ontology validate" "ontology diagram" "ontology show" "DIPPER_ORA_USER" "DIPPER_ORA_PASSWORD" "DIPPER_AI_" "GuardedSelect"; do
             grep -q "$phrase" skills/dipper/SKILL.md || { echo "missing skill phrase: $phrase"; exit 1; }
           done
           if grep -RInE 'DIPPER_AI_' src .claude .cursor AGENTS.md; then

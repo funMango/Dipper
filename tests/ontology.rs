@@ -2,6 +2,31 @@ mod common;
 
 use std::path::Path;
 
+fn ontology_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let root = dir.join("ontology");
+    let mut files = Vec::new();
+    let mut pending = vec![root];
+    while let Some(path) = pending.pop() {
+        let entries = std::fs::read_dir(&path).unwrap();
+        for entry in entries {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.push((relative, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 fn events_db(dir: &Path) {
     let conn = rusqlite::Connection::open(dir.join("source.db")).unwrap();
     conn.execute_batch(
@@ -477,11 +502,11 @@ fn second_pull_preserves_overlay() {
 }
 
 #[test]
-fn render_writes_markdown_from_the_merged_document() {
+fn show_prints_merged_document_json() {
     let dir = tempfile::tempdir().unwrap();
     events_db(dir.path());
-    let config = config(dir.path());
-    pull(dir.path(), &config, &[]).code(0);
+    let config_path = config(dir.path());
+    pull(dir.path(), &config_path, &[]).code(0);
     let overlay_dir = dir.path().join("ontology/overlay/sample");
     std::fs::create_dir_all(&overlay_dir).unwrap();
     std::fs::write(
@@ -489,16 +514,164 @@ fn render_writes_markdown_from_the_merged_document() {
         r#"{"version":1,"columns":[{"name":"QTY","meaning":"how many","meaning_status":"confirmed","unit":"item","unit_status":"confirmed"}]}"#,
     )
     .unwrap();
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args(["ontology", "show", "sample", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["command"], "ontology.show");
+    assert_eq!(doc["source"], "sample");
+    assert!(doc["error"].is_null());
+    let tables = doc["tables"].as_array().unwrap();
+    assert_eq!(tables.len(), 1);
+    let qty = tables[0]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|column| column["name"] == "QTY")
+        .unwrap();
+    assert_eq!(qty["meaning"], "how many");
+    assert_eq!(qty["meaning_status"], "confirmed");
+    let id = tables[0]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|column| column["name"] == "ID")
+        .unwrap();
+    assert_eq!(id["data_type"], "INTEGER");
+
+    let related = tempfile::tempdir().unwrap();
+    related_db(related.path());
+    let related_config = config(related.path());
+    for table in ["ORDERS", "INTERSECTIONS"] {
+        common::dipper()
+            .current_dir(related.path())
+            .args(["--config"])
+            .arg(&related_config)
+            .args(["ontology", "pull", "sample", "--table", table])
+            .assert()
+            .code(0);
+    }
+    let overlay_dir = related.path().join("ontology/overlay/sample");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("main.ORDERS.json"),
+        r#"{
+  "version": 1,
+  "relations": [
+    {
+      "columns": ["CROSS_ID"],
+      "target_owner": "main",
+      "target_table": "INTERSECTIONS",
+      "target_columns": ["CROSS_ID"],
+      "status": "draft",
+      "evidence": "same column name"
+    },
+    {
+      "columns": ["PART"],
+      "target_owner": "main",
+      "target_table": "INTERSECTIONS",
+      "target_columns": ["PART"],
+      "status": "confirmed",
+      "evidence": "confirmed by the user"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+    let output = common::dipper()
+        .current_dir(related.path())
+        .args([
+            "ontology", "show", "sample", "--table", "ORDERS", "--format", "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let table = &doc["tables"][0];
+    assert_eq!(table["owner"], "main");
+    assert_eq!(table["table"], "ORDERS");
+    let statuses: Vec<&str> = table["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|relation| relation["status"].as_str().unwrap())
+        .collect();
+    assert!(statuses.contains(&"draft"), "{statuses:?}");
+    assert!(statuses.contains(&"confirmed"), "{statuses:?}");
+    assert!(!table["foreign_keys"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn show_table_filter_and_missing_table_exit_1() {
+    let dir = tempfile::tempdir().unwrap();
+    events_db(dir.path());
+    let config = config(dir.path());
+    pull(dir.path(), &config, &[]).code(0);
+    let output = common::dipper()
+        .current_dir(dir.path())
+        .args([
+            "ontology",
+            "show",
+            "sample",
+            "--table",
+            "main.EVENTS",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["tables"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["tables"][0]["table"], "EVENTS");
+    let missing = common::dipper()
+        .current_dir(dir.path())
+        .args([
+            "ontology",
+            "show",
+            "sample",
+            "--table",
+            "main.NOPE",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let err: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(err["error"]["code"], "object_not_found");
+    assert!(err["tables"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn show_writes_no_files() {
+    let dir = tempfile::tempdir().unwrap();
+    events_db(dir.path());
+    let config = config(dir.path());
+    pull(dir.path(), &config, &[]).code(0);
+    let before = ontology_files(dir.path());
     common::dipper()
         .current_dir(dir.path())
+        .args(["ontology", "show", "sample"])
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains("main.EVENTS  columns"));
+    assert_eq!(ontology_files(dir.path()), before);
+}
+
+#[test]
+fn render_subcommand_is_removed() {
+    common::dipper()
         .args(["ontology", "render"])
         .assert()
-        .code(0);
-    let md = std::fs::read_to_string(dir.path().join("ontology/md/sample/main.EVENTS.md")).unwrap();
-    assert!(md.contains("EVENT_DT"), "{md}");
-    assert!(md.contains("how many"), "{md}");
-    assert!(md.contains("confirmed"), "{md}");
-    assert!(md.contains("| ID | INTEGER |"), "{md}");
+        .code(2);
 }
 
 #[test]
@@ -679,95 +852,6 @@ fn sqlite_extract_includes_declared_foreign_keys() {
     assert!(names.contains(&"JYWK_CNT"), "{names:?}");
     assert!(names.contains(&"VS"), "{names:?}");
     assert!(names.contains(&"XC"), "{names:?}");
-}
-
-#[test]
-fn render_outputs_obsidian_wikilinks_and_index() {
-    let dir = tempfile::tempdir().unwrap();
-    related_db(dir.path());
-    let config = config(dir.path());
-    for table in ["ORDERS", "INTERSECTIONS"] {
-        common::dipper()
-            .current_dir(dir.path())
-            .args(["--config"])
-            .arg(&config)
-            .args(["ontology", "pull", "sample", "--table", table])
-            .assert()
-            .code(0);
-    }
-    let overlay_dir = dir.path().join("ontology/overlay/sample");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
-    std::fs::write(
-        overlay_dir.join("main.ORDERS.json"),
-        r#"{
-  "version": 1,
-  "relations": [
-    {
-      "columns": ["CROSS_ID"],
-      "target_owner": "main",
-      "target_table": "INTERSECTIONS",
-      "target_columns": ["CROSS_ID"],
-      "status": "draft",
-      "evidence": "same column name",
-      "overlap": {
-        "source_non_null_rows": 1200,
-        "target_non_null_rows": 80,
-        "matched_rows": 1195,
-        "match_ratio": 0.9958333333333333
-      }
-    },
-    {
-      "columns": ["PART"],
-      "target_owner": "main",
-      "target_table": "INTERSECTIONS",
-      "target_columns": ["PART"],
-      "status": "confirmed",
-      "evidence": "confirmed by the user"
-    }
-  ]
-}"#,
-    )
-    .unwrap();
-    let output = common::dipper()
-        .current_dir(dir.path())
-        .args(["ontology", "render"])
-        .assert()
-        .code(0)
-        .get_output()
-        .clone();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("_index.md"), "{stdout}");
-    let md = std::fs::read_to_string(dir.path().join("ontology/md/sample/main.ORDERS.md")).unwrap();
-    assert!(md.contains("| ID | INTEGER |"), "{md}");
-    assert!(
-        md.contains("- `CROSS_ID, PART` -> [[main.PARTS]] (`CROSS_ID, PART`) (fk_0)"),
-        "{md}"
-    );
-    assert!(
-        md.contains("- `CROSS_ID` -> [[main.INTERSECTIONS]] (`CROSS_ID`) (fk_1)"),
-        "{md}"
-    );
-    assert!(
-        md.contains("- [draft] `CROSS_ID` -> [[main.INTERSECTIONS]] (`CROSS_ID`) — same column name (overlap: 1195/1200, 99.6%)"),
-        "{md}"
-    );
-    assert!(
-        md.contains(
-            "- [confirmed] `PART` -> [[main.INTERSECTIONS]] (`PART`) — confirmed by the user"
-        ),
-        "{md}"
-    );
-    let confirmed = md
-        .lines()
-        .find(|line| line.contains("[confirmed]"))
-        .unwrap();
-    assert!(!confirmed.contains("overlap"), "{confirmed}");
-    let index = std::fs::read_to_string(dir.path().join("ontology/md/sample/_index.md")).unwrap();
-    assert!(index.contains("[[main.INTERSECTIONS]]"), "{index}");
-    assert!(index.contains("[[main.ORDERS]]"), "{index}");
-    let inter = index.find("[[main.INTERSECTIONS]]").unwrap();
-    let orders = index.find("[[main.ORDERS]]").unwrap();
-    assert!(inter < orders, "{index}");
 }
 
 #[test]
