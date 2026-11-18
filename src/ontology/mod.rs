@@ -7,7 +7,6 @@ mod layout;
 mod load;
 mod merge;
 mod mermaid;
-mod render;
 mod schema;
 mod svg;
 
@@ -17,5 +16,5 @@ pub(crate) use diagram::{
 pub use extract::pull;
 pub(crate) use extract::split_table;
 pub(crate) use graph::Selection;
-pub use render::render;
-pub use schema::validate;
+pub(crate) use load::load_source;
+pub use schema::{validate, OntologyDoc, RelationStatus};

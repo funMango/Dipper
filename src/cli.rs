@@ -63,8 +63,17 @@ pub enum OntologyCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
         format: OutputFormat,
     },
-    /// Write `ontology/md` from extracted JSON plus any overlay.
-    Render,
+    /// Print the merged ontology. Does not open a database or write a file.
+    Show {
+        /// Source directory name under `ontology/extracted`.
+        source: String,
+        /// `OWNER.TABLE`. A name without a dot uses owner `main`.
+        #[arg(long)]
+        table: Option<String>,
+        /// stdout format. `table` is one summary line per table.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
     /// Draw an SVG relationship diagram from ontology JSON. Does not open a database.
     Diagram {
         /// Source directory name under `ontology/extracted`.
@@ -194,7 +203,7 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
         format: OutputFormat,
     },
-    /// Read a source dictionary into ontology JSON, or check and render it.
+    /// Read a source dictionary into ontology JSON, or check it, draw it, or show it.
     Ontology {
         #[command(subcommand)]
         action: OntologyCommand,
@@ -282,9 +291,17 @@ pub fn run(cli: Cli) -> Result<(), DipperError> {
                     format,
                     &mut handle,
                 ),
-                OntologyCommand::Render => {
-                    crate::commands::ontology::render_docs(std::path::Path::new("."), &mut handle)
-                }
+                OntologyCommand::Show {
+                    source,
+                    table,
+                    format,
+                } => crate::commands::ontology::show(
+                    std::path::Path::new("."),
+                    &source,
+                    table.as_deref(),
+                    format,
+                    &mut handle,
+                ),
                 OntologyCommand::Diagram {
                     source,
                     root,
