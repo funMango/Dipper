@@ -62,13 +62,20 @@
 - 근거: 민호님 2026-11-26 15:47 "남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해"
 - 원본은 `ontology.yaml`의 `data_quality_exceptions`.
 
+**카메라가 없는 접근로 (접근로는 실제로 있고 유효 뷰에 남김)**
+
+- 부천여중사거리 북(남향)(BC002N0274 / ACSR000001): 카메라 없음.
+- 역곡남부역삼거리 북(남향)(BC001N0071 / ACSR000004): 카메라 없음.
+- 근거: 민호님 2026-11-26 16:52 "부천여중사거리-북(남향), 역곡남부역삼거리-북(남향) 또한 카메라가 없다. 이를 기록하라"
+- 규칙(AI용): `v_approach_camera.camera_count`가 0인 접근로는 `camera_note`로 구분합니다. `camera_note`가 '카메라 없음(민호님 확인 2026-11-26)'이면 실제로 카메라가 없는 것이고, 0인데 `camera_note`가 NULL이면 누락인지 실제로 없는 것인지 확인되지 않았으므로 단정하지 말고 그렇게 답합니다.
+
 ## 4. 뷰 컬럼 요약
 
 - `v_approach`: node_id, acsr_id, approach_key, crsrd_nm, position_bearing(진입 위치), heading_bearing(진행 방향), direction_label(`북(남향)`), human_key, heading_matches_name, acsr_nm, acsr_drct, acsr_drct_nm, lane_qnty, key_rows, key_status
 - `v_approach_key`: 키당 1행. 중복 키는 표시값이 NULL이고 key_status가 '미확인: 접근로 중복 키'
 - `v_movement`: movement_key, direction_label, movement_nm, movement_short(좌/직/우/유턴/직우), human_key, key_status
 - `v_camera`: cmr_id, cmr_nm, node_id, crsrd_nm, acsr_id, approach_key, direction_label, human_key, cmr_no, use_yn, ovr_stt_yn, vrtl_cmr_yn, name_has_gyo, name_token_before_last, camera_role_status('역할 구분 안 함'), link_status
-- `v_approach_camera`: 접근로 키당 1행. node_id, acsr_id, approach_key, crsrd_nm, direction_label, human_key, camera_count, gyo_camera_count, camera_ids, camera_names, key_status
+- `v_approach_camera`: 접근로 키당 1행. node_id, acsr_id, approach_key, crsrd_nm, direction_label, human_key, camera_count, gyo_camera_count, camera_ids, camera_names, key_status, camera_note(카메라 없음으로 확인된 접근로만 표시, 나머지 NULL)
 - `v_lane`: node_id, acsr_id, lane_drct_cd(01~05), lane_drct_nm, lane_drct_short, lane_no, area_seqno, crsrd_nm, direction_label, key_status
 - `v_approach_signal`: cycl, grn_tm, ylw_tm, pdst_grn_tm, itrs_offs, lftrn_form(_nm), lftrn_grn_tm, lftrn_ylw_tm, stlf_grn_tm, stlf_ylw_tm, key_status
 - `v_intersection`: node_id, crsrd_nm, sgnl_crsrd_no, sgnl_ctrl_id, approach_count, camera_count

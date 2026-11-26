@@ -25,6 +25,11 @@ SELECT count(*) AS approaches, sum(camera_count) AS cameras, count(*) FILTER (WH
 FROM onto_v2.v_approach_camera;
 -- 카메라 역할 표시 (기대값: '역할 구분 안 함' 1344)
 SELECT camera_role_status, count(*) FROM onto_v2.v_camera GROUP BY ALL;
+-- 카메라 없음 기록 (기대값: 2행, 모두 camera_count=0, camera_note 있음. camera_note가 있는 행은 전체 2행, 마스터 카메라 0)
+SELECT node_id, acsr_id, crsrd_nm, direction_label, camera_count, camera_note,
+       (SELECT count(*) FROM onto_v2.m_cmr_inf m WHERE m.node_id = a.node_id AND m.acsr_id = a.acsr_id) AS master_cameras,
+       (SELECT count(*) FROM onto_v2.v_approach_camera WHERE camera_note IS NOT NULL) AS note_rows
+FROM onto_v2.v_approach_camera a WHERE camera_note IS NOT NULL ORDER BY node_id, acsr_id;
 -- 미확인 목록 (기대값: 0행)
 SELECT count(*) AS unconfirmed FROM onto_v2.v_unconfirmed;
 -- 없는 접근로 제외 확인 (기대값: 마스터 접근로 2 / 회전 4 / 신호 1 / 유효 뷰에 남은 행 모두 0 / BC002N0275 유효 접근로 2)

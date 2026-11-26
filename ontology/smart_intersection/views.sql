@@ -139,13 +139,16 @@ LEFT JOIN onto_v2.v_approach_key k ON k.node_id = m.node_id AND k.acsr_id = m.ac
 
 -- 방향(접근로)별 카메라 전체 목록: 접근로 키당 1행. 역할을 정하지 않고 그 접근로에 걸린 카메라를 모두 적는다(민호님 결정 2026-11-26).
 -- 표시 형식 예: '<교차로명> 동(서향) = 카메라 A, B'. 중복 키 접근로는 key_status가 '미확인: 접근로 중복 키'.
+-- camera_note: 카메라 수가 0인 접근로 중 '실제로 카메라가 없다'고 민호님이 확인한 것만 표시한다(나머지 NULL). 0인데 NULL이면 누락 여부를 단정하지 않는다.
+--   확인된 접근로: BC002N0274/ACSR000001(부천여중사거리 북(남향)), BC001N0071/ACSR000004(역곡남부역삼거리 북(남향)). 근거: 민호님 2026-11-26 16:52.
 CREATE VIEW onto_v2.v_approach_camera AS
 SELECT k.node_id, k.acsr_id, k.approach_key, k.crsrd_nm, k.direction_label, k.human_key,
        count(m.cmr_id) AS camera_count,
        count(m.cmr_id) FILTER (WHERE m.cmr_nm LIKE '%-교-%') AS gyo_camera_count,
        coalesce(list(m.cmr_id ORDER BY m.cmr_id) FILTER (WHERE m.cmr_id IS NOT NULL), []) AS camera_ids,
        string_agg(m.cmr_nm, ', ' ORDER BY m.cmr_id) AS camera_names,
-       k.key_status
+       k.key_status,
+       CASE WHEN (k.node_id, k.acsr_id) IN (('BC002N0274', 'ACSR000001'), ('BC001N0071', 'ACSR000004')) THEN '카메라 없음(민호님 확인 2026-11-26)' END AS camera_note
 FROM onto_v2.v_approach_key k
 LEFT JOIN onto_v2.m_cmr_inf m ON m.node_id = k.node_id AND m.acsr_id = k.acsr_id
 GROUP BY k.node_id, k.acsr_id, k.approach_key, k.crsrd_nm, k.direction_label, k.human_key, k.key_status;

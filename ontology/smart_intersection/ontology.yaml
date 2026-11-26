@@ -215,6 +215,7 @@ decisions:
   - {item: LANE_DRCT_CD, decision: "M_CD_INF GRP_CD='DRCT_CD' CD→CD_NM(01 좌회전, 02 직진, 03 우회전, 04 유턴, 05 직우)로 이름을 붙임", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
   - {item: LANE_DRCT_CD_06_10, decision: "차로 DRCT_CD 06~10(362행)은 무시. 01~05만 유효. v_lane에서 제외, 마스터 행은 유지", date: "2026-11-26", source: "민호님 2026-11-26 15:34 결정(관리자봇 채팅): '06~10은 무시한다. 01~05만 유효한것으로 인정'", status: 확인}
   - {item: ACSR_DUP_KEY, decision: "BC002N0275/ACSR000002는 실제로는 없는 접근로. 남부천신협앞 유효 접근로는 ACSR000001 북(남향), ACSR000003 남(북향)뿐. 유효 뷰에서 제외(data_quality_exceptions)", date: "2026-11-26", source: "민호님 2026-11-26 15:47 원문: '남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해'", status: 확인}
+  - {item: NO_CAMERA_APPROACH, decision: "부천여중사거리 북(남향)(BC002N0274/ACSR000001)과 역곡남부역삼거리 북(남향)(BC001N0071/ACSR000004)은 카메라가 없다. 접근로는 유효 뷰에 남기고 v_approach_camera.camera_note에 표시(data_quality_exceptions)", date: "2026-11-26", source: "민호님 2026-11-26 16:52 원문(관리자봇 인용, 팀장봇 전달): '부천여중사거리-북(남향), 역곡남부역삼거리-북(남향) 또한 카메라가 없다. 이를 기록하라'", status: 확인}
 
 data_quality_exceptions:
   - id: BC002N0275_ACSR000002
@@ -235,6 +236,26 @@ data_quality_exceptions:
     confirmed: '접근로 2행(동(서향)·서(동향)), 회전 4행, 신호 조건 1행을 모두 유효 뷰에서 빼고 북(남향)·남(북향)으로 옮기지 않으며 예외 메모에만 남긴다. 확정: 민호님 2026-11-26 15:56 "승인"'
     source: "민호님 2026-11-26 15:47 원문: '남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해'"
     checked: "2026-11-26 회사 DB 읽기 전용 조회(원본 좌표값은 기록하지 않음)"
+  - id: BC002N0274_ACSR000001_no_camera
+    type: no_camera
+    node_id: BC002N0274
+    acsr_id: ACSR000001
+    crsrd_nm: 부천여중사거리
+    direction_label: 북(남향)
+    finding: "접근로는 실제로 있고 유효 뷰에 남긴다. 이 접근로에는 카메라가 없다(M_CMR_INF 연결 0대)."
+    handling: "v_approach_camera.camera_note = '카메라 없음(민호님 확인 2026-11-26)'. 카메라 수 0을 누락으로 보지 않는다."
+    source: "민호님 2026-11-26 16:52 원문(관리자봇 인용, 팀장봇 전달): '부천여중사거리-북(남향), 역곡남부역삼거리-북(남향) 또한 카메라가 없다. 이를 기록하라'"
+    status: confirmed
+  - id: BC001N0071_ACSR000004_no_camera
+    type: no_camera
+    node_id: BC001N0071
+    acsr_id: ACSR000004
+    crsrd_nm: 역곡남부역삼거리
+    direction_label: 북(남향)
+    finding: "접근로는 실제로 있고 유효 뷰에 남긴다. 이 접근로에는 카메라가 없다(M_CMR_INF 연결 0대)."
+    handling: "v_approach_camera.camera_note = '카메라 없음(민호님 확인 2026-11-26)'. 카메라 수 0을 누락으로 보지 않는다."
+    source: "민호님 2026-11-26 16:52 원문(관리자봇 인용, 팀장봇 전달): '부천여중사거리-북(남향), 역곡남부역삼거리-북(남향) 또한 카메라가 없다. 이를 기록하라'"
+    status: confirmed
 
 unconfirmed: []  # 2026-11-26 모두 결정됨
 
