@@ -1,6 +1,6 @@
 # 스마트교차로 AI 용어집 (온톨로지 v2)
 
-원본은 `ontology/smart_intersection/ontology.yaml`입니다. 이 문서는 AI에게 그대로 넣는 요약본입니다. 조회는 Dipper store(`.dipper/store.duckdb`)의 `onto_v2` 스키마 뷰로 합니다.
+원본은 `ontology/smart_intersection/ontology.yaml`입니다. 이 문서는 AI에게 그대로 넣는 요약본입니다. 조회는 Dipper store(`.dipper/traffic_volume.duckdb`)의 `onto_v2` 스키마 뷰로 합니다.
 
 ## 1. 계층
 

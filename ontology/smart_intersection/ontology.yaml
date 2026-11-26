@@ -7,7 +7,7 @@ created: "2026-11-26"
 approved: "민호님 2026-11-26 08:50 (업무 팀장봇 전달)"
 source:
   database: "회사 Oracle DB, 소유자 CRSRD (읽기 전용 조회)"
-  store: ".dipper/store.duckdb, 스키마 onto_v2"
+  store: ".dipper/traffic_volume.duckdb, 스키마 onto_v2"
   loaded_at: "2026-11-26 08:53:12"
   views_file: "ontology/smart_intersection/views.sql"
   glossary_file: "ontology/smart_intersection/glossary_ai.md"
