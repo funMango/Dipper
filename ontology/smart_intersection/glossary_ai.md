@@ -28,7 +28,7 @@
 7. 카메라는 `M_CMR_INF.NODE_ID`와 `ACSR_ID`로 교차로와 방향에 잇습니다. 교통량은 이름에 `-교-`가 있는 카메라만 셉니다(`v_camera.name_has_gyo`). 4K·교·가상 카메라의 역할은 정하지 않습니다(역할 구분 안 함). 접근로별로 걸린 카메라를 모두 적으려면 `v_approach_camera`를 씁니다. 형식: `<교차로명> 동(서향) = 카메라 A, B`.
 8. **`M_CRSRD_SGNL_CMR_MC`는 쓰지 않습니다**(사용 안 함, 민호님 결정 2026-11-26).
 9. 차로 테이블의 `DRCT_CD`는 `M_CD_INF`의 `GRP_CD='DRCT_CD'` 코드표로 읽습니다: 01 좌회전, 02 직진, 03 우회전, 04 유턴, 05 직우. **01~05만 유효하고 06~10은 무시합니다(민호님 결정 2026-11-26).** `v_lane`에는 01~05만 있고(`lane_drct_cd`, `lane_drct_nm`), 마스터 행은 지우지 않았습니다.
-10. 접근로 중복 키 BC002N0275 / ACSR000002(남부천신협앞)는 두 행의 이름이 동(서향)과 서(동향)로 다릅니다. 회전 4행과 신호 조건 1행은 어느 행 것인지 알 수 없고, 카메라·차로는 0입니다. `v_approach_key`에서 방향 표시를 비워 두었습니다. 그 방향에 걸린 질문에는 '미확인'이라고 답합니다.
+10. 남부천신협앞(BC002N0275)의 ACSR000002는 실제로는 없는 접근로입니다. 유효 접근로는 북(남향)과 남(북향) 두 개뿐이고, ACSR000002는 유효 뷰에서 뺐습니다(`v_excluded_approach`, 아래 '3-1. 예외·데이터 품질 메모').
 11. 신호 제어기 키: `SGNL_CTRL_ID = 'SGNLC' + SGNL_CRSRD_NO(5자리)`.
 12. store의 신호 조건은 적재 시점(2026-11-26 08:53 KST) 값입니다. 최신값과 시간별 이력은 회사 DB(`M_CRSRD_ACSR_SGNL_CNDT`, `L_KHCM_CRSRD_ACSR_SGNL_CNDT_15MI/1HH`)에 있습니다.
 13. LOS 값은 등급입니다(단위가 아님).
@@ -36,11 +36,7 @@
 
 ## 3. 미확인 (추정해서 답하지 않음)
 
-| 항목 | 알려진 것 | 상태 |
-|---|---|---|
-| 접근로 중복 키 BC002N0275 / ACSR000002 (처리 보류) | 두 행 이름이 동(서향)과 서(동향)로 다름. 회전 4행·신호 조건 1행은 어느 행 것인지 알 수 없음. 카메라 0, 차로 0 | 미확인 |
-
-`onto_v2.v_unconfirmed`에도 같은 목록이 있습니다.
+현재 미확인 항목은 없습니다(2026-11-26 모두 결정). `onto_v2.v_unconfirmed`는 비어 있습니다. 새로 모르는 것이 생기면 추정하지 말고 여기에 적습니다.
 
 ### 결정된 항목 (2026-11-26, 민호님)
 
@@ -51,8 +47,20 @@
 | 카메라 4K·교·가상 | 역할 구분 안 함. 접근로별로 카메라를 모두 나열(`v_approach_camera`) |
 | M_CRSRD_SGNL_CMR_MC | 쓰지 않음 |
 | 차로 DRCT_CD | M_CD_INF `DRCT_CD` 코드표(01~05)로 이름. 06~10은 무시 |
+| 남부천신협앞 ACSR000002 | 실제로는 없는 접근로. 유효 뷰에서 제외(아래 3-1) |
 
 출처·시각은 `ontology.yaml`의 `decisions`에 있습니다.
+
+## 3-1. 예외·데이터 품질 메모
+
+**남부천신협앞(BC002N0275) ACSR000002: 실제로는 없는 접근로**
+
+- 유효 접근로는 ACSR000001 북(남향), ACSR000003 남(북향) 두 개뿐입니다.
+- 회사 DB에 남아 있는 행: 접근로 2행(`남부천신협앞-동(서향)`, `남부천신협앞-서(동향)`, 같은 키), 회전 4행(DRCT_CD 01~04, 어느 접근로 행 것인지 구분 불가), 신호 조건 1행. 카메라 0대, 차로 0행.
+- 처리: 마스터 행은 지우지 않고 유효 뷰(v_approach, v_approach_key, v_movement, v_lane, v_approach_signal, v_approach_camera, v_intersection의 approach_count)에서 뺐습니다. 회전·신호 행은 다른 접근로로 옮기지 않았습니다. 제외 목록은 `onto_v2.v_excluded_approach`(views.sql).
+- 확인 대기: 회전 4행·신호 조건 1행을 유효 뷰에서 빼는 처리는 민호님 확인을 기다리고 있습니다.
+- 근거: 민호님 2026-11-26 15:47 "남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해"
+- 원본은 `ontology.yaml`의 `data_quality_exceptions`.
 
 ## 4. 뷰 컬럼 요약
 
@@ -65,7 +73,8 @@
 - `v_approach_signal`: cycl, grn_tm, ylw_tm, pdst_grn_tm, itrs_offs, lftrn_form(_nm), lftrn_grn_tm, lftrn_ylw_tm, stlf_grn_tm, stlf_ylw_tm, key_status
 - `v_intersection`: node_id, crsrd_nm, sgnl_crsrd_no, sgnl_ctrl_id, approach_count, camera_count
 - `v_signal_controller`: sgnl_ctrl_id, node_id, crsrd_nm, id_rule_ok
-- `v_code`, `v_bearing`, `v_unconfirmed`
+- `v_excluded_approach`: 유효 뷰에서 뺀 없는 접근로 목록(node_id, acsr_id, crsrd_nm, reason, excluded_rows, source)
+- `v_code`, `v_bearing`, `v_unconfirmed`(현재 비어 있음)
 
 ## 5. 질문 예시와 SQL 틀
 
@@ -78,4 +87,4 @@
 
 ## 6. 개수 (2026-11-26 확인)
 
-교차로 286, 방향 1,032행(키 1,031), 좌/직/우 4,122, 차로 2,709(v_lane은 06~10을 뺀 2,347), 카메라 1,344(접근로에 연결 1,338, v_approach_camera 1,031행), 신호 제어기 286, 방향 신호 조건 1,033, 코드 136(그룹 22).
+교차로 286, 방향 마스터 1,032행(키 1,031, 유효 뷰 1,030), 좌/직/우 마스터 4,122(유효 뷰 4,118), 차로 2,709(v_lane은 06~10을 뺀 2,347), 카메라 1,344(접근로에 연결 1,338, v_approach_camera 1,030행), 신호 제어기 286, 방향 신호 조건 1,033(유효 뷰 1,032), 코드 136(그룹 22).

@@ -4,6 +4,7 @@
 -- 실행: DuckDB에서 한 번 실행. 이미 있는 이름은 덮어쓰지 않도록 CREATE VIEW(OR REPLACE 없음)를 쓴다.
 -- 이미 만든 store에서 뷰를 바꿀 때: OR REPLACE를 쓰지 않고, 바뀐 뷰만 한 트랜잭션 안에서 DROP VIEW 후 이 파일의 CREATE VIEW를 의존 순서대로 실행한다.
 -- 2026-11-26 미확인 결정 반영: v_lane(코드표 이름, 06~10 제외), v_camera(역할 구분 안 함), v_approach_camera(새 뷰), v_unconfirmed(중복 키만).
+-- 2026-11-26 15:47 결정: BC002N0275/ACSR000002는 없는 접근로. v_excluded_approach(새 뷰)에 적고 v_approach·v_movement·v_lane·v_approach_signal에서 뺀다. v_unconfirmed는 비움.
 
 -- 방위 값 목록: 8방위 정규형, 반대 방위, ACSR_DRCT 코드
 CREATE VIEW onto_v2.v_bearing AS
@@ -19,7 +20,17 @@ SELECT c.grp_cd, g.grp_cd_nm, c.cd, c.cd_nm, c.use_yn, c.sort_no,
 FROM onto_v2.m_cd_inf c
 LEFT JOIN onto_v2.m_cd_grp_inf g ON g.grp_cd = c.grp_cd;
 
--- 방향(접근로): 마스터 행 그대로(1,032행). 진입 위치는 ACSR_NM의 '-위치 (' 부분, 진행 방향은 위치의 반대.
+-- 실제로는 없는 접근로(데이터 품질 예외). 마스터 행은 지우지 않고 유효 뷰에서 뺀다. 회전·신호 행은 다른 접근로로 옮기지 않는다.
+-- 근거: 민호님 2026-11-26 15:47 "남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해"
+CREATE VIEW onto_v2.v_excluded_approach AS
+SELECT * FROM (VALUES
+  ('BC002N0275', 'ACSR000002', '남부천신협앞',
+   '실제로는 없는 접근로. 유효 접근로는 ACSR000001 북(남향), ACSR000003 남(북향)뿐',
+   '접근로 2행(동(서향), 서(동향)), 회전 4행(01~04), 신호 조건 1행을 유효 뷰에서 제외(회전·신호 제외는 민호님 확인 대기). 카메라 0, 차로 0',
+   '민호님 2026-11-26 15:47')
+) AS t(node_id, acsr_id, crsrd_nm, reason, excluded_rows, source);
+
+-- 방향(접근로): 마스터 행에서 v_excluded_approach를 뺀 유효 행(1,030행). 진입 위치는 ACSR_NM의 '-위치 (' 부분, 진행 방향은 위치의 반대.
 CREATE VIEW onto_v2.v_approach AS
 WITH a AS (
   SELECT x.*,
@@ -27,6 +38,7 @@ WITH a AS (
          regexp_extract(x.acsr_nm, '\(\s*(북동|북서|남동|남서|동북|동남|서북|서남|북|남|동|서)향\s*\)', 1) AS hdg_raw,
          count(*) OVER (PARTITION BY x.node_id, x.acsr_id) AS key_rows
   FROM onto_v2.m_crsrd_acsr_inf x
+  WHERE NOT EXISTS (SELECT 1 FROM onto_v2.v_excluded_approach e WHERE e.node_id = x.node_id AND e.acsr_id = x.acsr_id)
 ), n AS (
   SELECT a.*,
          CASE pos_raw WHEN '동북' THEN '북동' WHEN '동남' THEN '남동' WHEN '서남' THEN '남서' WHEN '서북' THEN '북서' ELSE NULLIF(pos_raw,'') END AS position_bearing,
@@ -90,7 +102,8 @@ SELECT d.node_id, d.acsr_id, d.drct_cd,
        CASE WHEN k.node_id IS NULL THEN '접근로 마스터에 없음' ELSE k.key_status END AS key_status
 FROM onto_v2.m_crsrd_drct_inf d
 LEFT JOIN onto_v2.v_approach_key k ON k.node_id = d.node_id AND k.acsr_id = d.acsr_id
-LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'DRCT_CD' AND c.cd = d.drct_cd;
+LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'DRCT_CD' AND c.cd = d.drct_cd
+WHERE NOT EXISTS (SELECT 1 FROM onto_v2.v_excluded_approach e WHERE e.node_id = d.node_id AND e.acsr_id = d.acsr_id);
 
 -- 차로: DRCT_CD는 M_CD_INF GRP_CD='DRCT_CD' 코드표(01 좌회전, 02 직진, 03 우회전, 04 유턴, 05 직우)로 이름을 붙인다.
 -- 01~05만 유효. 06~10은 무시한다(민호님 결정 2026-11-26). 이 뷰에서 빼고, 마스터 행은 지우지 않는다.
@@ -103,7 +116,8 @@ SELECT l.node_id, l.acsr_id, l.drct_cd AS lane_drct_cd, c.cd_nm AS lane_drct_nm,
 FROM onto_v2.m_crsrd_lane_inf l
 LEFT JOIN onto_v2.v_approach_key k ON k.node_id = l.node_id AND k.acsr_id = l.acsr_id
 LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'DRCT_CD' AND c.cd = l.drct_cd
-WHERE l.drct_cd IN ('01', '02', '03', '04', '05');
+WHERE l.drct_cd IN ('01', '02', '03', '04', '05')
+  AND NOT EXISTS (SELECT 1 FROM onto_v2.v_excluded_approach e WHERE e.node_id = l.node_id AND e.acsr_id = l.acsr_id);
 
 -- 카메라: M_CMR_INF.NODE_ID, ACSR_ID로 교차로와 방향에 연결. M_CRSRD_SGNL_CMR_MC는 쓰지 않는다(사용 안 함, 민호님 결정 2026-11-26).
 -- 4K·교·가상 카메라의 역할은 정하지 않는다(역할 구분 안 함). 접근로별 카메라 목록은 v_approach_camera.
@@ -146,11 +160,11 @@ SELECT s.node_id, s.acsr_id, s.node_id || ':' || s.acsr_id AS approach_key,
        CASE WHEN k.node_id IS NULL THEN '접근로 마스터에 없음' ELSE k.key_status END AS key_status
 FROM onto_v2.m_crsrd_acsr_sgnl_cndt s
 LEFT JOIN onto_v2.v_approach_key k ON k.node_id = s.node_id AND k.acsr_id = s.acsr_id
-LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'LFTRN_FORM' AND c.cd = s.lftrn_form;
+LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'LFTRN_FORM' AND c.cd = s.lftrn_form
+WHERE NOT EXISTS (SELECT 1 FROM onto_v2.v_excluded_approach e WHERE e.node_id = s.node_id AND e.acsr_id = s.acsr_id);
 
 -- 아직 답이 없는 항목(AI가 추정하지 않도록). 결정된 항목은 ontology.yaml의 decisions에 있다.
+-- 2026-11-26 현재 미확인 항목 없음(빈 뷰). 새로 모르는 것이 생기면 VALUES로 행을 넣는다.
 CREATE VIEW onto_v2.v_unconfirmed AS
-SELECT * FROM (VALUES
-  ('ACSR_DUP_KEY', '접근로 중복 키 BC002N0275 / ACSR000002 처리(보류)',
-   '두 행 이름이 동(서향)과 서(동향)로 다름. 회전 4행·신호 조건 1행은 어느 행 것인지 알 수 없음. 카메라 0, 차로 0. v_approach_key에서 표시값을 비움')
-) AS t(item, question, note);
+SELECT CAST(NULL AS VARCHAR) AS item, CAST(NULL AS VARCHAR) AS question, CAST(NULL AS VARCHAR) AS note
+WHERE false;

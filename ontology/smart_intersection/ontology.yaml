@@ -5,7 +5,7 @@ ontology: smart_intersection
 version: 2
 created: "2026-11-26"
 approved: "민호님 2026-11-26 08:50 (업무 팀장봇 전달)"
-updated: "2026-11-26 미확인 6개 중 5개 결정 반영(decisions 참고). 중복 키는 미확인 유지"
+updated: "2026-11-26 미확인 6개 모두 결정 반영(decisions, data_quality_exceptions 참고)"
 source:
   database: "회사 Oracle DB, 소유자 CRSRD (읽기 전용 조회)"
   store: ".dipper/traffic_volume.duckdb, 스키마 onto_v2"
@@ -56,6 +56,8 @@ classes:
     direction_label_format: "<진입위치>(<진행방향>향)"
     count_rows: 1032
     count_distinct_keys: 1031
+    valid_rows_in_view: 1030
+    excluded_view: onto_v2.v_excluded_approach
     view: onto_v2.v_approach
     join_view: onto_v2.v_approach_key
     derived:
@@ -169,7 +171,7 @@ classes:
     status: 확인
 
 relations:
-  - {from: Intersection, rel: has_approach, to: Approach, keys: [node_id], cardinality: "1 : 2~4", evidence: "방향 2개 1곳, 3개 111곳, 4개 174곳(키 기준)", status: 확인}
+  - {from: Intersection, rel: has_approach, to: Approach, keys: [node_id], cardinality: "1 : 2~4", evidence: "방향 2개 2곳, 3개 110곳, 4개 174곳(유효 접근로 기준, 없는 접근로 BC002N0275/ACSR000002 제외 반영)", status: 확인}
   - {from: Approach, rel: has_movement, to: Movement, keys: [node_id, acsr_id], cardinality: "1 : 1~4", evidence: "4,122행 중 접근로 마스터에 없는 키 46행", status: 확인}
   - {from: Approach, rel: has_lane, to: Lane, keys: [node_id, acsr_id], cardinality: "1 : 0..N", evidence: "2,709행 중 접근로 마스터에 없는 키 25행", status: 확인}
   - {from: Intersection, rel: controlled_by, to: SignalController, keys: [node_id], cardinality: "1 : 1", evidence: "286/286", status: 확인}
@@ -192,7 +194,8 @@ forbidden_joins:
 rules:
   - "이름은 키가 아니다. 사람이 읽는 키는 표시와 질문 해석에만 쓰고, 조인은 기계 키로 한다."
   - "방향 표기는 '북(남향)' 형식. 공백 없이 위치 + '(' + 진행방향 + '향)'."
-  - "접근로 중복 키(BC002N0275/ACSR000002)는 v_approach_key에서 표시값을 비우고 '미확인'으로 둔다. 임의로 한 행을 고르지 않는다."
+  - "v_excluded_approach에 적힌 접근로(BC002N0275/ACSR000002)는 실제로는 없는 접근로다. 유효 뷰에서 빼고, 그 접근로의 회전·신호 행을 다른 접근로로 옮기지 않는다."
+  - "같은 키에 행이 여러 개인 접근로가 새로 생기면 v_approach_key에서 표시값을 비우고 '미확인'으로 둔다. 임의로 한 행을 고르지 않는다."
   - "측정 테이블: TOT_DT는 구간 시작, 0대 구간은 행 없음, DRCT_CD는 01~05로 거름, 1DD는 TRUNC(TOT_DT)로 묶음."
   - "회전 단위 측정의 LOS와 VC는 비어 있다(2026-11-24 하루 확인). V_LOS는 0만 있다."
   - "LOS 값은 등급이다(단위가 아님)."
@@ -211,10 +214,29 @@ decisions:
   - {item: SGNL_CMR_MC, decision: "M_CRSRD_SGNL_CMR_MC 쓰지 않음", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
   - {item: LANE_DRCT_CD, decision: "M_CD_INF GRP_CD='DRCT_CD' CD→CD_NM(01 좌회전, 02 직진, 03 우회전, 04 유턴, 05 직우)로 이름을 붙임", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
   - {item: LANE_DRCT_CD_06_10, decision: "차로 DRCT_CD 06~10(362행)은 무시. 01~05만 유효. v_lane에서 제외, 마스터 행은 유지", date: "2026-11-26", source: "민호님 2026-11-26 15:34 결정(관리자봇 채팅): '06~10은 무시한다. 01~05만 유효한것으로 인정'", status: 확인}
-  - {item: ACSR_DUP_KEY, decision: "처리 보류. 미확인 유지", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 미확인}
+  - {item: ACSR_DUP_KEY, decision: "BC002N0275/ACSR000002는 실제로는 없는 접근로. 남부천신협앞 유효 접근로는 ACSR000001 북(남향), ACSR000003 남(북향)뿐. 유효 뷰에서 제외(data_quality_exceptions)", date: "2026-11-26", source: "민호님 2026-11-26 15:47 원문: '남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해'", status: 확인}
 
-unconfirmed:
-  - {item: ACSR_DUP_KEY, question: "접근로 중복 키 BC002N0275 / ACSR000002 처리", known: "두 행의 접근로 이름이 동(서향)과 서(동향)로 다름(ACSR_NM·SGNL_ACSR_NM·ACSR_DRCT·좌표·ACSR_ANGL이 다름). 회전 4행(01~04)과 신호 조건 1행은 어느 행 것인지 알 수 없음. 카메라 0대, 차로 0행(2026-11-26 회사 DB 읽기 전용 조회)", status: 미확인}
+data_quality_exceptions:
+  - id: BC002N0275_ACSR000002
+    node_id: BC002N0275
+    acsr_id: ACSR000002
+    crsrd_nm: 남부천신협앞
+    finding: "실제로는 없는 접근로다. 남부천신협앞의 유효 접근로는 ACSR000001 북(남향)과 ACSR000003 남(북향) 두 개뿐이다."
+    rows_in_company_db:
+      approach: "M_CRSRD_ACSR_INF 2행: '남부천신협앞-동(서향)', '남부천신협앞-서(동향)' (같은 키. 이름·ACSR_DRCT·좌표·ACSR_ANGL이 다름)"
+      movement: "M_CRSRD_DRCT_INF 4행(DRCT_CD 01~04). 두 접근로 행 중 어느 쪽 것인지 구분할 컬럼 없음"
+      signal: "M_CRSRD_ACSR_SGNL_CNDT 1행"
+      camera: "M_CMR_INF 0대"
+      lane: "M_CRSRD_LANE_INF 0행"
+    handling:
+      - "마스터 테이블 행은 지우지 않는다."
+      - "유효 뷰(v_approach, v_approach_key, v_movement, v_lane, v_approach_signal, v_approach_camera, v_intersection.approach_count)에서 뺀다. 제외 목록 뷰: onto_v2.v_excluded_approach (views.sql)."
+      - "회전 4행과 신호 조건 1행은 다른 접근로로 옮기지 않는다."
+    pending: "회전 4행·신호 조건 1행을 유효 뷰에서 빼는 처리는 민호님 확인 대기"
+    source: "민호님 2026-11-26 15:47 원문: '남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해'"
+    checked: "2026-11-26 회사 DB 읽기 전용 조회(원본 좌표값은 기록하지 않음)"
+
+unconfirmed: []  # 2026-11-26 모두 결정됨
 
 verification:
   checked_at: "2026-11-26"
@@ -229,16 +251,17 @@ verification:
     - {table: M_CD_INF, source: 136, store: 136, expected: 136}
     - {table: M_CD_GRP_INF, source: 22, store: 22, expected: 22}
   views:
-    v_approach: 1032
-    v_approach_key: 1031
-    v_movement: 4122
+    v_approach: 1030
+    v_approach_key: 1030
+    v_movement: 4118
     v_lane: 2347
     v_camera: 1344
     v_intersection: 286
     v_signal_controller: 286
-    v_approach_signal: 1033
+    v_approach_signal: 1032
     v_code: 136
     v_bearing: 8
-    v_approach_camera: 1031
-    v_unconfirmed: 1
-  views_note: "v_lane은 차로 마스터 2,709행 중 DRCT_CD 06~10 362행을 뺀 값(2026-11-26 결정)"
+    v_approach_camera: 1030
+    v_unconfirmed: 0
+    v_excluded_approach: 1
+  views_note: "v_lane은 차로 마스터 2,709행 중 DRCT_CD 06~10 362행을 뺀 값(2026-11-26 결정). v_approach·v_approach_key·v_movement·v_approach_signal·v_approach_camera는 없는 접근로 BC002N0275/ACSR000002를 뺀 값(접근로 2행, 키 1, 회전 4행, 신호 1행)"
