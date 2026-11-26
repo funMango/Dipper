@@ -2,6 +2,8 @@
 -- 원본 정의: ontology/smart_intersection/ontology.yaml
 -- 적재 테이블(onto_v2.m_*)은 회사 DB CRSRD 마스터의 읽기 전용 사본이다. 이 파일은 뷰만 만든다.
 -- 실행: DuckDB에서 한 번 실행. 이미 있는 이름은 덮어쓰지 않도록 CREATE VIEW(OR REPLACE 없음)를 쓴다.
+-- 이미 만든 store에서 뷰를 바꿀 때: OR REPLACE를 쓰지 않고, 바뀐 뷰만 한 트랜잭션 안에서 DROP VIEW 후 이 파일의 CREATE VIEW를 의존 순서대로 실행한다.
+-- 2026-11-26 미확인 결정 반영: v_lane(코드표 이름, 06~10 제외), v_camera(역할 구분 안 함), v_approach_camera(새 뷰), v_unconfirmed(중복 키만).
 
 -- 방위 값 목록: 8방위 정규형, 반대 방위, ACSR_DRCT 코드
 CREATE VIEW onto_v2.v_bearing AS
@@ -90,16 +92,21 @@ FROM onto_v2.m_crsrd_drct_inf d
 LEFT JOIN onto_v2.v_approach_key k ON k.node_id = d.node_id AND k.acsr_id = d.acsr_id
 LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'DRCT_CD' AND c.cd = d.drct_cd;
 
--- 차로: 이 테이블의 DRCT_CD(01~10)는 회전 코드와 범위가 달라 코드표에 잇지 않는다(미확인).
+-- 차로: DRCT_CD는 M_CD_INF GRP_CD='DRCT_CD' 코드표(01 좌회전, 02 직진, 03 우회전, 04 유턴, 05 직우)로 이름을 붙인다.
+-- 01~05만 유효. 06~10은 무시한다(민호님 결정 2026-11-26). 이 뷰에서 빼고, 마스터 행은 지우지 않는다.
 CREATE VIEW onto_v2.v_lane AS
-SELECT l.node_id, l.acsr_id, l.drct_cd AS lane_drct_cd_raw, l.lane_no, l.area_seqno,
+SELECT l.node_id, l.acsr_id, l.drct_cd AS lane_drct_cd, c.cd_nm AS lane_drct_nm,
+       CASE l.drct_cd WHEN '01' THEN '좌' WHEN '02' THEN '직' WHEN '03' THEN '우' WHEN '04' THEN '유턴' WHEN '05' THEN '직우' END AS lane_drct_short,
+       l.lane_no, l.area_seqno,
        k.crsrd_nm, k.direction_label, l.max_trf_qnty,
-       '미확인: 차로 DRCT_CD 코드표' AS lane_drct_cd_status,
        CASE WHEN k.node_id IS NULL THEN '접근로 마스터에 없음' ELSE k.key_status END AS key_status
 FROM onto_v2.m_crsrd_lane_inf l
-LEFT JOIN onto_v2.v_approach_key k ON k.node_id = l.node_id AND k.acsr_id = l.acsr_id;
+LEFT JOIN onto_v2.v_approach_key k ON k.node_id = l.node_id AND k.acsr_id = l.acsr_id
+LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'DRCT_CD' AND c.cd = l.drct_cd
+WHERE l.drct_cd IN ('01', '02', '03', '04', '05');
 
--- 카메라: M_CMR_INF.NODE_ID, ACSR_ID로 교차로와 방향에 연결. M_CRSRD_SGNL_CMR_MC는 쓰지 않는다.
+-- 카메라: M_CMR_INF.NODE_ID, ACSR_ID로 교차로와 방향에 연결. M_CRSRD_SGNL_CMR_MC는 쓰지 않는다(사용 안 함, 민호님 결정 2026-11-26).
+-- 4K·교·가상 카메라의 역할은 정하지 않는다(역할 구분 안 함). 접근로별 카메라 목록은 v_approach_camera.
 CREATE VIEW onto_v2.v_camera AS
 SELECT m.cmr_id, m.cmr_nm, m.node_id, i.crsrd_nm, m.acsr_id,
        k.approach_key, k.direction_label,
@@ -107,7 +114,7 @@ SELECT m.cmr_id, m.cmr_nm, m.node_id, i.crsrd_nm, m.acsr_id,
        m.cmr_no, m.use_yn, m.ovr_stt_yn, m.vrtl_cmr_yn, m.gis_dspl_yn, m.srvr_id,
        (m.cmr_nm LIKE '%-교-%') AS name_has_gyo,
        trim(list_extract(string_split(m.cmr_nm, '-'), -2)) AS name_token_before_last,
-       '미확인' AS camera_role_status,
+       '역할 구분 안 함' AS camera_role_status,
        m.lng_crdn, m.lat_crdn, m.reg_dt, m.mdfcn_dt,
        CASE WHEN m.acsr_id IS NULL THEN 'ACSR_ID 없음'
             WHEN k.node_id IS NULL THEN '접근로 마스터에 없음'
@@ -115,6 +122,19 @@ SELECT m.cmr_id, m.cmr_nm, m.node_id, i.crsrd_nm, m.acsr_id,
 FROM onto_v2.m_cmr_inf m
 LEFT JOIN onto_v2.m_crsrd_inf i ON i.node_id = m.node_id
 LEFT JOIN onto_v2.v_approach_key k ON k.node_id = m.node_id AND k.acsr_id = m.acsr_id;
+
+-- 방향(접근로)별 카메라 전체 목록: 접근로 키당 1행. 역할을 정하지 않고 그 접근로에 걸린 카메라를 모두 적는다(민호님 결정 2026-11-26).
+-- 표시 형식 예: '<교차로명> 동(서향) = 카메라 A, B'. 중복 키 접근로는 key_status가 '미확인: 접근로 중복 키'.
+CREATE VIEW onto_v2.v_approach_camera AS
+SELECT k.node_id, k.acsr_id, k.approach_key, k.crsrd_nm, k.direction_label, k.human_key,
+       count(m.cmr_id) AS camera_count,
+       count(m.cmr_id) FILTER (WHERE m.cmr_nm LIKE '%-교-%') AS gyo_camera_count,
+       coalesce(list(m.cmr_id ORDER BY m.cmr_id) FILTER (WHERE m.cmr_id IS NOT NULL), []) AS camera_ids,
+       string_agg(m.cmr_nm, ', ' ORDER BY m.cmr_id) AS camera_names,
+       k.key_status
+FROM onto_v2.v_approach_key k
+LEFT JOIN onto_v2.m_cmr_inf m ON m.node_id = k.node_id AND m.acsr_id = k.acsr_id
+GROUP BY k.node_id, k.acsr_id, k.approach_key, k.crsrd_nm, k.direction_label, k.human_key, k.key_status;
 
 -- 방향(접근로)별 신호 조건(현재값). 시간 단위 이력은 회사 DB L_KHCM_CRSRD_ACSR_SGNL_CNDT_15MI/1HH.
 CREATE VIEW onto_v2.v_approach_signal AS
@@ -128,13 +148,9 @@ FROM onto_v2.m_crsrd_acsr_sgnl_cndt s
 LEFT JOIN onto_v2.v_approach_key k ON k.node_id = s.node_id AND k.acsr_id = s.acsr_id
 LEFT JOIN onto_v2.m_cd_inf c ON c.grp_cd = 'LFTRN_FORM' AND c.cd = s.lftrn_form;
 
--- 아직 답이 없는 항목(AI가 추정하지 않도록)
+-- 아직 답이 없는 항목(AI가 추정하지 않도록). 결정된 항목은 ontology.yaml의 decisions에 있다.
 CREATE VIEW onto_v2.v_unconfirmed AS
 SELECT * FROM (VALUES
-  ('LOS', 'LOS 숫자의 단위와 산식', '측정 테이블 LOS는 0~999.9 연속 숫자. 단위 미확인'),
-  ('RING_DRCT_CD', '신호 이력 링 방향 코드(이동류) 0~18의 뜻', '코드표 없음'),
-  ('CAMERA_ROLE', '카메라 이름의 4K, 과, 가상 카메라(VRTL_CMR_YN=Y)의 역할', 'CMR_CLS 모두 비어 있음'),
-  ('ACSR_DUP_KEY', '접근로 중복 키 BC002N0275 / ACSR000002', 'v_approach_key에서 표시값을 비움'),
-  ('SGNL_CMR_MC', 'M_CRSRD_SGNL_CMR_MC 사용 여부', '조인 금지. store에 적재하지 않음'),
-  ('LANE_DRCT_CD', '차로 테이블 DRCT_CD 01~10의 코드표', '회전 DRCT_CD와 범위가 다름')
+  ('ACSR_DUP_KEY', '접근로 중복 키 BC002N0275 / ACSR000002 처리(보류)',
+   '두 행 이름이 동(서향)과 서(동향)로 다름. 회전 4행·신호 조건 1행은 어느 행 것인지 알 수 없음. 카메라 0, 차로 0. v_approach_key에서 표시값을 비움')
 ) AS t(item, question, note);

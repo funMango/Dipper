@@ -5,6 +5,7 @@ ontology: smart_intersection
 version: 2
 created: "2026-11-26"
 approved: "민호님 2026-11-26 08:50 (업무 팀장봇 전달)"
+updated: "2026-11-26 미확인 6개 중 5개 결정 반영(decisions 참고). 중복 키는 미확인 유지"
 source:
   database: "회사 Oracle DB, 소유자 CRSRD (읽기 전용 조회)"
   store: ".dipper/traffic_volume.duckdb, 스키마 onto_v2"
@@ -28,6 +29,10 @@ terms:
     means: "진입 위치 '북' + 진행 방향 '남향'. 진행 방향은 늘 진입 위치의 반대"
     status: 확인
     evidence: "ACSR_NM 1,032행 모두 위치와 '(..향)'이 읽히고, 1,032행 모두 반대 방위"
+  - word: "LOS"
+    means: "서비스 수준 등급. 값은 등급이며 단위가 아니다"
+    status: 확인
+    source: "민호님 2026-11-26 15:23 결정"
 
 classes:
   Intersection:
@@ -85,9 +90,13 @@ classes:
     key: [node_id, acsr_id, drct_cd, lane_no, area_seqno]
     count: 2709
     view: onto_v2.v_lane
+    view_count: 2347
+    codes: {"01": 좌회전, "02": 직진, "03": 우회전, "04": 유턴, "05": 직우}
+    code_source: "M_CD_INF GRP_CD='DRCT_CD'의 CD → CD_NM"
     notes:
-      - "이 테이블의 DRCT_CD는 01~10이다. 회전 코드(01~05)와 범위가 달라 코드표에 잇지 않는다."
-    status: "확인(개수), 미확인(DRCT_CD 코드표)"
+      - "차로 DRCT_CD는 01~05만 유효하다. 06~10은 무시한다(민호님 결정 2026-11-26). 코드표에 없는 값이라 추측하지 않는다."
+      - "06~10 행(362행)은 v_lane에서 뺀다. 마스터 테이블 행은 지우지 않는다(마스터 2,709 / v_lane 2,347)."
+    status: 확인
 
   Camera:
     label: 카메라
@@ -102,9 +111,12 @@ classes:
       intersection: "M_CMR_INF.NODE_ID → M_CRSRD_INF.NODE_ID (1,344/1,344)"
       approach: "M_CMR_INF.(NODE_ID, ACSR_ID) → M_CRSRD_ACSR_INF (1,338/1,338, ACSR_ID 빈 카메라 6대)"
     traffic_camera_rule: "교통량은 이름에 '-교-'가 있는 카메라만 센다(민호님 규칙). 현재 836대"
-    role: 미확인
-    role_note: "이름의 '4K', '과', 가상 카메라(VRTL_CMR_YN=Y)의 역할은 미확인. CMR_CLS는 모두 비어 있다."
-    status: "확인(연결), 미확인(역할)"
+    role: "역할 구분 안 함"
+    role_note: "4K·교·가상 카메라(VRTL_CMR_YN=Y)의 역할은 정하지 않는다(민호님 결정 2026-11-26). CMR_CLS는 모두 비어 있다."
+    approach_camera_view: onto_v2.v_approach_camera
+    approach_camera_rule: "node_id·acsr_id(접근로)별로 그 접근로에 걸린 카메라를 모두 적는다. 접근로 키당 1행, camera_count·camera_ids·camera_names. 목록은 뷰가 만든다"
+    approach_camera_format: "<교차로명> <진입위치>(<진행방향>향) = 카메라 A, B  예: '화목사거리 동(서향) = 카메라 A, B'"
+    status: 확인
 
   SignalController:
     label: 신호 제어기
@@ -165,12 +177,14 @@ relations:
   - {from: Camera, rel: at, to: Intersection, keys: [node_id], cardinality: "N : 1", evidence: "1,344/1,344, 교차로 286곳 모두 카메라 있음", status: 확인}
   - {from: Camera, rel: observes, to: Approach, keys: [node_id, acsr_id], cardinality: "N : 1", evidence: "1,338/1,338, 방향 1,028개", status: 확인}
   - {from: Movement, rel: coded_by, to: Code, keys: ["drct_cd = cd (grp_cd='DRCT_CD')"], status: 확인}
+  - {from: Lane, rel: coded_by, to: Code, keys: ["drct_cd = cd (grp_cd='DRCT_CD')"], note: "01~05만. 06~10은 무시", status: 확인}
+  - {from: Approach, rel: has_cameras, to: Camera, keys: [node_id, acsr_id], view: onto_v2.v_approach_camera, cardinality: "1 : 0..N", status: 확인}
   - {from: Approach, rel: coded_by, to: Code, keys: ["acsr_drct = cd (grp_cd='ACSR_DRCT')"], note: "참고용. 키로 쓰지 않음", status: 확인}
 
 forbidden_joins:
   - table: CRSRD.M_CRSRD_SGNL_CMR_MC
-    reason: "사용 여부 미확인. 제어기 ID가 신호 마스터와 405/739행만 맞음. 조인하지 않고 store에도 적재하지 않음"
-    status: 미확인
+    reason: "사용 안 함(민호님 결정 2026-11-26). 제어기 ID가 신호 마스터와 405/739행만 맞음. 조인하지 않고 store에도 적재하지 않음"
+    status: "확인(사용 안 함)"
   - table: "CRSRD.M_CRSRD_SGNL_AREA_CNFG_INF.AREA_SEQNO ↔ M_CRSRD_LANE_INF.AREA_SEQNO"
     reason: "번호는 겹치지만 회전·차로가 맞지 않음"
     status: 미확인
@@ -181,14 +195,26 @@ rules:
   - "접근로 중복 키(BC002N0275/ACSR000002)는 v_approach_key에서 표시값을 비우고 '미확인'으로 둔다. 임의로 한 행을 고르지 않는다."
   - "측정 테이블: TOT_DT는 구간 시작, 0대 구간은 행 없음, DRCT_CD는 01~05로 거름, 1DD는 TRUNC(TOT_DT)로 묶음."
   - "회전 단위 측정의 LOS와 VC는 비어 있다(2026-11-24 하루 확인). V_LOS는 0만 있다."
+  - "LOS 값은 등급이다(단위가 아님)."
+  - "RING_DRCT_CD(신호 이력 링 방향 코드)는 온톨로지에서 제외한다. 뷰·용어에 쓰지 않는다."
+  - "차로 DRCT_CD는 01~05만 유효하다. 06~10은 무시한다(민호님 결정 2026-11-26). v_lane에서 빼고 마스터 행은 지우지 않는다."
+  - "카메라 역할은 구분하지 않는다. 접근로별 카메라는 v_approach_camera로 모두 나열한다."
+
+excluded:
+  - {item: RING_DRCT_CD, reason: "온톨로지에서 제외(민호님 결정 2026-11-26)"}
+  - {item: CRSRD.M_CRSRD_SGNL_CMR_MC, reason: "사용 안 함(민호님 결정 2026-11-26)"}
+
+decisions:
+  - {item: LOS, decision: "LOS 값은 등급(단위 아님)", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
+  - {item: RING_DRCT_CD, decision: "온톨로지에서 제외", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
+  - {item: CAMERA_ROLE, decision: "4K·교·가상 카메라 역할을 정하지 않고 node_id·acsr_id별로 카메라를 모두 나열(v_approach_camera)", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
+  - {item: SGNL_CMR_MC, decision: "M_CRSRD_SGNL_CMR_MC 쓰지 않음", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
+  - {item: LANE_DRCT_CD, decision: "M_CD_INF GRP_CD='DRCT_CD' CD→CD_NM(01 좌회전, 02 직진, 03 우회전, 04 유턴, 05 직우)로 이름을 붙임", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 확인}
+  - {item: LANE_DRCT_CD_06_10, decision: "차로 DRCT_CD 06~10(362행)은 무시. 01~05만 유효. v_lane에서 제외, 마스터 행은 유지", date: "2026-11-26", source: "민호님 2026-11-26 15:34 결정(관리자봇 채팅): '06~10은 무시한다. 01~05만 유효한것으로 인정'", status: 확인}
+  - {item: ACSR_DUP_KEY, decision: "처리 보류. 미확인 유지", date: "2026-11-26", source: "민호님 2026-11-26 15:23 결정(관리자봇 채팅에서 직접 답함), 15:34 진행 승인", status: 미확인}
 
 unconfirmed:
-  - {item: LOS, question: "LOS 숫자의 단위와 산식", known: "0~999.9 연속 숫자. DB 주석은 'LOS'·'서비스 수준'뿐", status: 미확인}
-  - {item: RING_DRCT_CD, question: "신호 이력의 링 방향 코드(이동류) 0~18의 뜻", known: "코드표 없음", status: 미확인}
-  - {item: CAMERA_ROLE, question: "카메라 이름 '4K', '과', 가상 카메라의 역할", status: 미확인}
-  - {item: ACSR_DUP_KEY, question: "접근로 중복 키 BC002N0275 / ACSR000002 처리", known: "두 행의 진입 위치가 서로 다름", status: 미확인}
-  - {item: SGNL_CMR_MC, question: "M_CRSRD_SGNL_CMR_MC 사용 여부", status: 미확인}
-  - {item: LANE_DRCT_CD, question: "차로 테이블 DRCT_CD 01~10의 코드표", status: 미확인}
+  - {item: ACSR_DUP_KEY, question: "접근로 중복 키 BC002N0275 / ACSR000002 처리", known: "두 행의 접근로 이름이 동(서향)과 서(동향)로 다름(ACSR_NM·SGNL_ACSR_NM·ACSR_DRCT·좌표·ACSR_ANGL이 다름). 회전 4행(01~04)과 신호 조건 1행은 어느 행 것인지 알 수 없음. 카메라 0대, 차로 0행(2026-11-26 회사 DB 읽기 전용 조회)", status: 미확인}
 
 verification:
   checked_at: "2026-11-26"
@@ -206,9 +232,13 @@ verification:
     v_approach: 1032
     v_approach_key: 1031
     v_movement: 4122
-    v_lane: 2709
+    v_lane: 2347
     v_camera: 1344
     v_intersection: 286
     v_signal_controller: 286
     v_approach_signal: 1033
     v_code: 136
+    v_bearing: 8
+    v_approach_camera: 1031
+    v_unconfirmed: 1
+  views_note: "v_lane은 차로 마스터 2,709행 중 DRCT_CD 06~10 362행을 뺀 값(2026-11-26 결정)"
