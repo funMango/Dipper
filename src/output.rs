@@ -344,7 +344,7 @@ mod tests {
         let config = Config {
             file: PathBuf::from("dipper.toml"),
             strict_readonly: false,
-            store: PathBuf::from("store.duckdb"),
+            store: PathBuf::from("traffic_volume.duckdb"),
             performance: Performance {
                 batch_rows: 10,
                 memory_limit: "64MiB".to_string(),

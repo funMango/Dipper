@@ -558,7 +558,7 @@ mod tests {
             temp_directory: dir.path().join("tmp"),
             progress_every_rows: 1000,
         };
-        let store = Store::open(&dir.path().join("store.duckdb"), &perf).unwrap();
+        let store = Store::open(&dir.path().join("traffic_volume.duckdb"), &perf).unwrap();
         store
             .conn
             .execute_batch(

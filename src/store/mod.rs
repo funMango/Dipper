@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn open_applies_memory_and_temp_and_creates_parents() {
         let dir = tempfile::tempdir().unwrap();
-        let store_path = dir.path().join("nested").join("store.duckdb");
+        let store_path = dir.path().join("nested").join("traffic_volume.duckdb");
         let perf = performance(dir.path(), "512MiB");
         let store = Store::open(&store_path, &perf).unwrap();
         assert!(store_path.is_file());
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn open_drops_leftover_staging_tables() {
         let dir = tempfile::tempdir().unwrap();
-        let store_path = dir.path().join("store.duckdb");
+        let store_path = dir.path().join("traffic_volume.duckdb");
         let perf = performance(dir.path(), "64MiB");
         let store = Store::open(&store_path, &perf).unwrap();
         store
@@ -289,7 +289,7 @@ mod tests {
         // The old columns/CLI fallback returns `ts` and this assertion fails.
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(
-            &dir.path().join("store.duckdb"),
+            &dir.path().join("traffic_volume.duckdb"),
             &performance(dir.path(), "64MiB"),
         )
         .unwrap();

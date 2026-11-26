@@ -109,7 +109,7 @@ mod tests {
             temp_directory: dir.path().join("tmp"),
             progress_every_rows: 1000,
         };
-        let store = Store::open(&dir.path().join("store.duckdb"), &perf).unwrap();
+        let store = Store::open(&dir.path().join("traffic_volume.duckdb"), &perf).unwrap();
         let started = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
         let finished = started + Duration::from_secs(2);
         store

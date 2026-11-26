@@ -318,7 +318,7 @@ mod tests {
             temp_directory: dir.join("tmp"),
             progress_every_rows: 1000,
         };
-        Store::open(&dir.join("store.duckdb"), &perf).unwrap()
+        Store::open(&dir.join("traffic_volume.duckdb"), &perf).unwrap()
     }
 
     fn chunk(columns: &[&str], rows: Vec<Vec<Value>>) -> Chunk {

@@ -709,7 +709,7 @@ mod tests {
         Config {
             file: PathBuf::from("dipper.toml"),
             strict_readonly: false,
-            store: PathBuf::from("store.duckdb"),
+            store: PathBuf::from("traffic_volume.duckdb"),
             performance: Performance {
                 batch_rows: 10,
                 memory_limit: "64MiB".to_string(),
@@ -867,7 +867,7 @@ mod tests {
             temp_directory: dir.path().join("tmp"),
             progress_every_rows: 1000,
         };
-        let store = Store::open(&dir.path().join("store.duckdb"), &perf).unwrap();
+        let store = Store::open(&dir.path().join("traffic_volume.duckdb"), &perf).unwrap();
         (dir, store)
     }
 
@@ -1090,7 +1090,7 @@ mod tests {
 
     fn secret_config(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
         std::env::set_var("DIPPER_PR8_SECRET", LEAK_PASSWORD);
-        let store = dir.join("store.duckdb");
+        let store = dir.join("traffic_volume.duckdb");
         let store_text = store.to_string_lossy().replace('\\', "/");
         let temp = dir.join("tmp");
         let temp_text = temp.to_string_lossy().replace('\\', "/");

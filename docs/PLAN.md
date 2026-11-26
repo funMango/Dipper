@@ -219,7 +219,7 @@ strict는 `[safety] strict_readonly = true` 또는 `--strict`로 켭니다(2026-
 
 ### 설정 예시
 ```toml
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 
 [performance]
 batch_rows = 10000
@@ -280,7 +280,7 @@ count_first = true
 - 동작 규약
   - 전역 옵션: `-c, --config <PATH>`(기본 `dipper.toml`), `-v, --verbose`(stderr에 debug 로그).
   - 상대 경로(`store`, `temp_directory`, SQLite `path`)는 설정 파일이 있는 폴더를 기준으로 풉니다.
-  - 기본값: `store = ".dipper/store.duckdb"`, `batch_rows = 10000`, `memory_limit = "2GB"`, `temp_directory = ".dipper/tmp"`, `progress_every_rows = 1000000`, `count_first = false`. `sources`는 1개 이상 필요하고 `dips`는 비어 있어도 됩니다.
+  - 기본값: `store = ".dipper/traffic_volume.duckdb"`, `batch_rows = 10000`, `memory_limit = "2GB"`, `temp_directory = ".dipper/tmp"`, `progress_every_rows = 1000000`, `count_first = false`. `sources`는 1개 이상 필요하고 `dips`는 비어 있어도 됩니다.
   - 알 수 없는 키는 오류입니다(`deny_unknown_fields`).
   - 환경변수 치환: source의 문자열 필드(`path`, `connect`, `user`, `password`)에서 `${NAME}`(NAME은 `[A-Za-z_][A-Za-z0-9_]*`)을 치환합니다. 설정되지 않은 변수는 필드 경로와 변수 이름을 담은 오류가 됩니다. `password`는 값 전체가 `${NAME}` 하나여야 하며, 직접 적은 값은 오류입니다(오류에 그 값을 넣지 않음).
   - 비밀번호는 `Secret` 타입에 담습니다. `Debug`는 `***`로 표시하고 `Display`는 구현하지 않습니다.

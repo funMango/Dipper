@@ -3,7 +3,7 @@ mod common;
 use dipper::config::{load_with_env, parse_memory_limit, FilterOp, SourceConfig};
 
 const EXAMPLE: &str = r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 
 [performance]
 batch_rows = 10000
@@ -56,7 +56,7 @@ fn example_loads_and_omitted_fields_use_defaults() {
     let config = load_with_env(&path, &example_env).unwrap();
 
     assert_eq!(config.file, path);
-    assert_eq!(config.store, dir.path().join(".dipper/store.duckdb"));
+    assert_eq!(config.store, dir.path().join(".dipper/traffic_volume.duckdb"));
     assert_eq!(config.performance.batch_rows, 10_000);
     assert_eq!(config.performance.memory_limit, "2GB");
     assert_eq!(
@@ -131,7 +131,7 @@ columns = ["ORDER_ID"]
 "#;
     let minimal_path = common::write_config(dir.path(), minimal);
     let config = load_with_env(&minimal_path, &|_| None).unwrap();
-    assert_eq!(config.store, dir.path().join(".dipper/store.duckdb"));
+    assert_eq!(config.store, dir.path().join(".dipper/traffic_volume.duckdb"));
     assert_eq!(config.performance.batch_rows, 10_000);
     assert_eq!(config.performance.memory_limit, "2GB");
     assert_eq!(

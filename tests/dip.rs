@@ -23,14 +23,14 @@ fn prepare(dir: &Path, performance: &str, dips: &str) -> (PathBuf, PathBuf) {
     let config = common::write_config(
         dir,
         &format!(
-            "store = \".dipper/store.duckdb\"\n\n[performance]\n{performance}\n\n[sources.sample]\nkind = \"sqlite\"\npath = \"source.db\"\n\n{dips}\n"
+            "store = \".dipper/traffic_volume.duckdb\"\n\n[performance]\n{performance}\n\n[sources.sample]\nkind = \"sqlite\"\npath = \"source.db\"\n\n{dips}\n"
         ),
     );
     (db, config)
 }
 
 fn store_path(dir: &Path) -> PathBuf {
-    dir.join(".dipper").join("store.duckdb")
+    dir.join(".dipper").join("traffic_volume.duckdb")
 }
 
 fn texts(output: &std::process::Output) -> (String, String) {
@@ -717,7 +717,7 @@ columns = ["ORDER_ID"]
     let config = common::write_config(
         view.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -777,7 +777,7 @@ key = "ORDER_ID"
     let config = common::write_config(
         safety.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [safety]
 strict_readonly = true
 [sources.sample]
@@ -932,7 +932,7 @@ fn oracle_password_never_appears_in_dip_output() {
     let config = common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.company]
 kind = "oracle"
 connect = "127.0.0.1:1521/NOPE"
@@ -984,7 +984,7 @@ fn reserved_names_and_case_duplicates_do_not_touch_the_store() {
     let config = common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -1016,7 +1016,7 @@ columns = ["ORDER_ID"]
             dir.path(),
             &format!(
                 r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -1050,7 +1050,7 @@ columns = ["ORDER_ID"]
     common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -1141,7 +1141,7 @@ fn events_config(dir: &std::path::Path, filters: &str) -> (std::path::PathBuf, s
         dir,
         &format!(
             r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -1593,7 +1593,7 @@ fn one_existing_table_refuses_the_whole_period_command() {
     let config = common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -1912,7 +1912,7 @@ fn period_merge_failure_rolls_back_table_and_slices() {
     common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -2110,7 +2110,7 @@ fn same_instant_bucket_does_not_include_subsecond_rows() {
     let config = common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -2474,7 +2474,7 @@ fn dip_json_has_no_row_values() {
     let config = common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.sample]
 kind = "sqlite"
 path = "source.db"
@@ -2505,7 +2505,7 @@ fn dip_json_hides_oracle_password_user_and_connect() {
     let config = common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.company]
 kind = "oracle"
 connect = "127.0.0.1:1521/NOPE"
@@ -2546,7 +2546,7 @@ fn oracle_secrets_are_redacted_without_format() {
     let config = common::write_config(
         dir.path(),
         r#"
-store = ".dipper/store.duckdb"
+store = ".dipper/traffic_volume.duckdb"
 [sources.company]
 kind = "oracle"
 connect = "127.0.0.1:1521/NOPE"

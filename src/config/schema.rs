@@ -260,7 +260,7 @@ pub struct Filter {
     pub value: Option<toml::Value>,
 }
 
-pub(crate) const DEFAULT_STORE: &str = ".dipper/store.duckdb";
+pub(crate) const DEFAULT_STORE: &str = ".dipper/traffic_volume.duckdb";
 pub(crate) const DEFAULT_BATCH_ROWS: usize = 10_000;
 pub(crate) const DEFAULT_MEMORY_LIMIT: &str = "2GB";
 pub(crate) const DEFAULT_TEMP_DIRECTORY: &str = ".dipper/tmp";
