@@ -30,6 +30,15 @@ SELECT * FROM (VALUES
    '민호님 2026-11-26 15:47 결정, 15:56 "승인"')
 ) AS t(node_id, acsr_id, crsrd_nm, reason, excluded_rows, source);
 
+-- 카메라 예외(데이터 품질): 마스터 m_cmr_inf 행은 지우지 않고 카메라 뷰에서만 뺀다. 다시 적재해도 이 목록으로 같은 결과가 나온다.
+--   v_camera·v_approach_camera·v_intersection.camera_count에서 뺀다. 접근로 연결은 바꾸지 않는다.
+-- 근거: 민호님 2026-11-27 17:40 "도약삼거리 '교-북' 카메라 정보 필요없으니 지우고"
+CREATE VIEW onto_v2.v_camera_exception AS
+SELECT * FROM (VALUES
+  ('BC002P1061', '308.도약3R-④-교-북(상행)', 'BC002N0207', 'exclude',
+   '도약삼거리에는 북 접근로가 없다. 이 카메라 정보는 필요 없음(지움). 마스터 행은 유지', '민호님 2026-11-27 17:40')
+) AS t(cmr_id, cmr_nm, node_id, action, reason, source);
+
 -- 방향(접근로): 마스터 행에서 v_excluded_approach를 뺀 유효 행(1,030행). 진입 위치는 ACSR_NM의 '-위치 (' 부분, 진행 방향은 위치의 반대.
 CREATE VIEW onto_v2.v_approach AS
 WITH a AS (
@@ -80,13 +89,16 @@ SELECT s.sgnl_ctrl_id, s.node_id, i.crsrd_nm, i.sgnl_crsrd_no, s.use_yn,
 FROM onto_v2.m_crsrd_sgnl_inf s
 LEFT JOIN onto_v2.m_crsrd_inf i ON i.node_id = s.node_id;
 
--- 교차로
+-- 교차로. intersection_note: 실제로 없는 방향이 있는 교차로만 표시(나머지 NULL). 근거: 민호님 2026-11-27 17:15.
+--   BC002N0207(도약삼거리)는 북 접근로 없음, BC001N0056(여월휴먼시아1단지입구삼거리)는 서북(서) 접근로 없음. 접근로는 3개가 정상이다.
 CREATE VIEW onto_v2.v_intersection AS
 SELECT i.node_id, i.crsrd_nm, i.sgnl_crsrd_nm, i.sgnl_crsrd_no, i.stnd_node_id,
        i.crsrd_cls, i.lng_crdn, i.lat_crdn, i.use_yn,
        s.sgnl_ctrl_id,
        (SELECT count(*) FROM onto_v2.v_approach_key k WHERE k.node_id = i.node_id) AS approach_count,
-       (SELECT count(*) FROM onto_v2.m_cmr_inf m WHERE m.node_id = i.node_id) AS camera_count
+       (SELECT count(*) FROM onto_v2.m_cmr_inf m WHERE m.node_id = i.node_id
+          AND NOT EXISTS (SELECT 1 FROM onto_v2.v_camera_exception ce WHERE ce.cmr_id = m.cmr_id)) AS camera_count,
+       CASE i.node_id WHEN 'BC002N0207' THEN '북 접근로 없음(실제로 없음, 민호님 확인 2026-11-27)' WHEN 'BC001N0056' THEN '서북 접근로 없음(실제로 없음, 민호님 확인 2026-11-27)' END AS intersection_note
 FROM onto_v2.m_crsrd_inf i
 LEFT JOIN onto_v2.m_crsrd_sgnl_inf s ON s.node_id = i.node_id;
 
@@ -121,6 +133,8 @@ WHERE l.drct_cd IN ('01', '02', '03', '04', '05')
 
 -- 카메라: M_CMR_INF.NODE_ID, ACSR_ID로 교차로와 방향에 연결. M_CRSRD_SGNL_CMR_MC는 쓰지 않는다(사용 안 함, 민호님 결정 2026-11-26).
 -- 4K·교·가상 카메라의 역할은 정하지 않는다(역할 구분 안 함). 접근로별 카메라 목록은 v_approach_camera.
+-- v_camera_exception에 있는 카메라(도약 BC002P1061)는 이 뷰에서 뺀다(민호님 2026-11-27 17:40).
+-- 여월 BC001P0198(이름 '교-서북')은 서(동향) ACSR000003 카메라가 맞다. 연결을 유지한다(민호님 2026-11-27 17:42).
 CREATE VIEW onto_v2.v_camera AS
 SELECT m.cmr_id, m.cmr_nm, m.node_id, i.crsrd_nm, m.acsr_id,
        k.approach_key, k.direction_label,
@@ -135,7 +149,8 @@ SELECT m.cmr_id, m.cmr_nm, m.node_id, i.crsrd_nm, m.acsr_id,
             ELSE k.key_status END AS link_status
 FROM onto_v2.m_cmr_inf m
 LEFT JOIN onto_v2.m_crsrd_inf i ON i.node_id = m.node_id
-LEFT JOIN onto_v2.v_approach_key k ON k.node_id = m.node_id AND k.acsr_id = m.acsr_id;
+LEFT JOIN onto_v2.v_approach_key k ON k.node_id = m.node_id AND k.acsr_id = m.acsr_id
+WHERE NOT EXISTS (SELECT 1 FROM onto_v2.v_camera_exception ce WHERE ce.cmr_id = m.cmr_id);
 
 -- 방향(접근로)별 카메라 전체 목록: 접근로 키당 1행. 역할을 정하지 않고 그 접근로에 걸린 카메라를 모두 적는다(민호님 결정 2026-11-26).
 -- 표시 형식 예: '<교차로명> 동(서향) = 카메라 A, B'. 중복 키 접근로는 key_status가 '미확인: 접근로 중복 키'.
@@ -151,6 +166,7 @@ SELECT k.node_id, k.acsr_id, k.approach_key, k.crsrd_nm, k.direction_label, k.hu
        CASE WHEN (k.node_id, k.acsr_id) IN (('BC002N0274', 'ACSR000001'), ('BC001N0071', 'ACSR000004')) THEN '카메라 없음(민호님 확인 2026-11-26)' END AS camera_note
 FROM onto_v2.v_approach_key k
 LEFT JOIN onto_v2.m_cmr_inf m ON m.node_id = k.node_id AND m.acsr_id = k.acsr_id
+                              AND NOT EXISTS (SELECT 1 FROM onto_v2.v_camera_exception ce WHERE ce.cmr_id = m.cmr_id)
 GROUP BY k.node_id, k.acsr_id, k.approach_key, k.crsrd_nm, k.direction_label, k.human_key, k.key_status;
 
 -- 방향(접근로)별 신호 조건(현재값). 시간 단위 이력은 회사 DB L_KHCM_CRSRD_ACSR_SGNL_CNDT_15MI/1HH.

@@ -69,16 +69,33 @@
 - 근거: 민호님 2026-11-26 16:52 "부천여중사거리-북(남향), 역곡남부역삼거리-북(남향) 또한 카메라가 없다. 이를 기록하라"
 - 규칙(AI용): `v_approach_camera.camera_count`가 0인 접근로는 `camera_note`로 구분합니다. `camera_note`가 '카메라 없음(민호님 확인 2026-11-26)'이면 실제로 카메라가 없는 것이고, 0인데 `camera_note`가 NULL이면 누락인지 실제로 없는 것인지 확인되지 않았으므로 단정하지 말고 그렇게 답합니다.
 
+**실제로 없는 방향이 있는 교차로 (접근로 3개가 정상)**
+
+- 도약삼거리(BC002N0207): 북 접근로가 없습니다. DB 접근로는 서(동향) ACSR000001, 동(서향) ACSR000002, 남(북향) ACSR000003 세 개입니다.
+- 여월휴먼시아1단지입구삼거리(BC001N0056): 서북 접근로가 없습니다. DB 접근로는 동(서향) ACSR000001, 남(북향) ACSR000002, 서(동향) ACSR000003 세 개입니다.
+- 근거: 민호님 2026-11-27 17:15 "도약삼거리-북은 없어 그리고 여월도 서북 없어"
+- 규칙(AI용): 이 두 교차로에서 없는 방향의 접근로가 없는 것은 정상입니다(누락 아님). 카메라 이름에 북(상행)이나 서북 같은 방향이 있어도 그 이름으로 접근로를 만들거나 추정하지 않습니다. `v_intersection.intersection_note`에 표시되어 있습니다.
+- 이 두 교차로의 '없는 방향' 카메라는 민호님 결정으로 처리했습니다(아래 '카메라 예외').
+
+**카메라 예외 (목록은 `onto_v2.v_camera_exception`)**
+
+- 도약삼거리(BC002N0207) 카메라 `BC002P1061`(`308.도약3R-④-교-북(상행)`): 북 접근로가 없어 정보가 필요 없습니다. 카메라 뷰(`v_camera`, `v_approach_camera`, `v_intersection.camera_count`)에서 뺐습니다. 마스터 행은 지우지 않았습니다(민호님 2026-11-27 17:40).
+- 여월휴먼시아1단지입구삼거리(BC001N0056) 카메라 `BC001P0198`: 이름은 '교-서북'이지만 실제로는 서(동향) ACSR000003 접근로의 카메라입니다(민호님 확인 2026-11-27 17:42). 연결을 그대로 유지합니다. 서(동향) 접근로의 카메라는 이 1대입니다.
+- 규칙(AI용): 카메라 이름의 북·서북만 보고 접근로를 만들거나 연결을 바꾸지 않습니다. `BC002P1061`은 카메라 목록에 넣지 않습니다.
+- 근거: 민호님 2026-11-27 17:40 "도약삼거리 '교-북' 카메라 정보 필요없으니 지우고, 여월 '교-서북' 카메라는 서쪽 접근로(ACSR000003)에 연결되지 않게" / 17:42 "아 그럼 서(동향)에는 저 카메라가 연결되어 있나보다 맞아!"
+- 원본은 `ontology.yaml`의 `data_quality_exceptions`(type approach_not_exist).
+
 ## 4. 뷰 컬럼 요약
 
 - `v_approach`: node_id, acsr_id, approach_key, crsrd_nm, position_bearing(진입 위치), heading_bearing(진행 방향), direction_label(`북(남향)`), human_key, heading_matches_name, acsr_nm, acsr_drct, acsr_drct_nm, lane_qnty, key_rows, key_status
 - `v_approach_key`: 키당 1행. 중복 키는 표시값이 NULL이고 key_status가 '미확인: 접근로 중복 키'
 - `v_movement`: movement_key, direction_label, movement_nm, movement_short(좌/직/우/유턴/직우), human_key, key_status
-- `v_camera`: cmr_id, cmr_nm, node_id, crsrd_nm, acsr_id, approach_key, direction_label, human_key, cmr_no, use_yn, ovr_stt_yn, vrtl_cmr_yn, name_has_gyo, name_token_before_last, camera_role_status('역할 구분 안 함'), link_status
+- `v_camera`: cmr_id, cmr_nm, node_id, crsrd_nm, acsr_id, approach_key, direction_label, human_key, cmr_no, use_yn, ovr_stt_yn, vrtl_cmr_yn, name_has_gyo, name_token_before_last, camera_role_status('역할 구분 안 함'), link_status. 제외 카메라(BC002P1061)는 없음
+- `v_camera_exception`: 카메라 예외 목록(cmr_id, cmr_nm, node_id, action(exclude), reason, source)
 - `v_approach_camera`: 접근로 키당 1행. node_id, acsr_id, approach_key, crsrd_nm, direction_label, human_key, camera_count, gyo_camera_count, camera_ids, camera_names, key_status, camera_note(카메라 없음으로 확인된 접근로만 표시, 나머지 NULL)
 - `v_lane`: node_id, acsr_id, lane_drct_cd(01~05), lane_drct_nm, lane_drct_short, lane_no, area_seqno, crsrd_nm, direction_label, key_status
 - `v_approach_signal`: cycl, grn_tm, ylw_tm, pdst_grn_tm, itrs_offs, lftrn_form(_nm), lftrn_grn_tm, lftrn_ylw_tm, stlf_grn_tm, stlf_ylw_tm, key_status
-- `v_intersection`: node_id, crsrd_nm, sgnl_crsrd_no, sgnl_ctrl_id, approach_count, camera_count
+- `v_intersection`: node_id, crsrd_nm, sgnl_crsrd_no, sgnl_ctrl_id, approach_count, camera_count, intersection_note(실제로 없는 방향이 있는 교차로만 표시, 나머지 NULL)
 - `v_signal_controller`: sgnl_ctrl_id, node_id, crsrd_nm, id_rule_ok
 - `v_excluded_approach`: 유효 뷰에서 뺀 없는 접근로 목록(node_id, acsr_id, crsrd_nm, reason, excluded_rows, source)
 - `v_code`, `v_bearing`, `v_unconfirmed`(현재 비어 있음)
@@ -94,4 +111,4 @@
 
 ## 6. 개수 (2026-11-26 확인)
 
-교차로 286, 방향 마스터 1,032행(키 1,031, 유효 뷰 1,030), 좌/직/우 마스터 4,122(유효 뷰 4,118), 차로 2,709(v_lane은 06~10을 뺀 2,347), 카메라 1,344(접근로에 연결 1,338, v_approach_camera 1,030행), 신호 제어기 286, 방향 신호 조건 1,033(유효 뷰 1,032), 코드 136(그룹 22).
+교차로 286, 방향 마스터 1,032행(키 1,031, 유효 뷰 1,030), 좌/직/우 마스터 4,122(유효 뷰 4,118), 차로 2,709(v_lane은 06~10을 뺀 2,347), 카메라 마스터 1,344(v_camera 1,343, 접근로에 연결 1,338, v_approach_camera 1,030행), 신호 제어기 286, 방향 신호 조건 1,033(유효 뷰 1,032), 코드 136(그룹 22).

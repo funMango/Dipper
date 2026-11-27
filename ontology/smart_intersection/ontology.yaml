@@ -43,6 +43,7 @@ classes:
     human_key: "crsrd_nm (CRSRD_NM)"
     count: 286
     view: onto_v2.v_intersection
+    note_column: "intersection_note (실제로 없는 방향이 있는 교차로만 표시, 나머지 NULL)"
     attributes: [node_id, crsrd_nm, sgnl_crsrd_nm, sgnl_crsrd_no, stnd_node_id, crsrd_cls, lng_crdn, lat_crdn, use_yn]
     status: 확인
 
@@ -110,7 +111,7 @@ classes:
     view: onto_v2.v_camera
     loaded_columns_excluded: "IP, RTSP 주소, 게이트웨이, 포트, UID, 로그인·비밀번호 계열은 조회하지 않음"
     links:
-      intersection: "M_CMR_INF.NODE_ID → M_CRSRD_INF.NODE_ID (1,344/1,344)"
+      intersection: "M_CMR_INF.NODE_ID → M_CRSRD_INF.NODE_ID (마스터 1,344/1,344. v_camera는 예외 1대를 뺀 1,343)"
       approach: "M_CMR_INF.(NODE_ID, ACSR_ID) → M_CRSRD_ACSR_INF (1,338/1,338, ACSR_ID 빈 카메라 6대)"
     traffic_camera_rule: "교통량은 이름에 '-교-'가 있는 카메라만 센다(민호님 규칙). 현재 836대"
     role: "역할 구분 안 함"
@@ -216,6 +217,8 @@ decisions:
   - {item: LANE_DRCT_CD_06_10, decision: "차로 DRCT_CD 06~10(362행)은 무시. 01~05만 유효. v_lane에서 제외, 마스터 행은 유지", date: "2026-11-26", source: "민호님 2026-11-26 15:34 결정(관리자봇 채팅): '06~10은 무시한다. 01~05만 유효한것으로 인정'", status: 확인}
   - {item: ACSR_DUP_KEY, decision: "BC002N0275/ACSR000002는 실제로는 없는 접근로. 남부천신협앞 유효 접근로는 ACSR000001 북(남향), ACSR000003 남(북향)뿐. 유효 뷰에서 제외(data_quality_exceptions)", date: "2026-11-26", source: "민호님 2026-11-26 15:47 원문: '남부천신협앞은 남(북향), 북(남향)밖에 없어 이거 두개만 인정하고 서부분은 없다고 따로 기록해'", status: 확인}
   - {item: NO_CAMERA_APPROACH, decision: "부천여중사거리 북(남향)(BC002N0274/ACSR000001)과 역곡남부역삼거리 북(남향)(BC001N0071/ACSR000004)은 카메라가 없다. 접근로는 유효 뷰에 남기고 v_approach_camera.camera_note에 표시(data_quality_exceptions)", date: "2026-11-26", source: "민호님 2026-11-26 16:52 원문(관리자봇 인용, 팀장봇 전달): '부천여중사거리-북(남향), 역곡남부역삼거리-북(남향) 또한 카메라가 없다. 이를 기록하라'", status: 확인}
+  - {item: APPROACH_NOT_EXIST, decision: "도약삼거리(BC002N0207)는 북 접근로가 없고, 여월휴먼시아1단지입구삼거리(BC001N0056)는 서북 접근로가 없다. 접근로 3개가 정상이며 접근로를 만들지 않는다. 교차로 정보(v_intersection.intersection_note)에 기록. 카메라 처리는 CAMERA_EXCEPTION 결정(2026-11-27 17:40, 17:42) 참고", date: "2026-11-27", source: "민호님 2026-11-27 17:15 원문(관리자봇 채팅, 팀장봇 전달): '도약삼거리-북은 없어 그리고 여월도 서북 없어'", status: 확인}
+  - {item: CAMERA_EXCEPTION, decision: "도약삼거리 '교-북' 카메라 BC002P1061은 카메라 뷰에서 제외(마스터 행 유지, 목록 뷰 v_camera_exception). 여월 '교-서북' 카메라 BC001P0198은 이름과 달리 실제로 서(동향) ACSR000003 카메라이므로 연결 유지", date: "2026-11-27", source: "민호님 2026-11-27 17:40 원문(관리자봇 채팅, 팀장봇 전달): 도약삼거리 '교-북' 카메라 정보 필요없으니 지우고, 여월 '교-서북' 카메라는 서쪽 접근로(ACSR000003)에 연결되지 않게 / 민호님 2026-11-27 17:42 원문(관리자봇 채팅, 팀장봇 전달): 아 그럼 서(동향)에는 저 카메라가 연결되어 있나보다 맞아!", status: 확인}
 
 data_quality_exceptions:
   - id: BC002N0275_ACSR000002
@@ -256,6 +259,45 @@ data_quality_exceptions:
     handling: "v_approach_camera.camera_note = '카메라 없음(민호님 확인 2026-11-26)'. 카메라 수 0을 누락으로 보지 않는다."
     source: "민호님 2026-11-26 16:52 원문(관리자봇 인용, 팀장봇 전달): '부천여중사거리-북(남향), 역곡남부역삼거리-북(남향) 또한 카메라가 없다. 이를 기록하라'"
     status: confirmed
+  - id: BC002N0207_north_approach_not_exist
+    type: approach_not_exist
+    node_id: BC002N0207
+    crsrd_nm: 도약삼거리
+    missing_direction: "북"
+    actual_approaches_in_db: "서(동향) ACSR000001, 동(서향) ACSR000002, 남(북향) ACSR000003"
+    finding: "이 교차로에는 북 접근로가 실제로 없다. 접근로 3개가 정상이다. 카메라 이름에 '북(상행)'이(가) 있어도 접근로를 만들지 않는다."
+    handling: "v_intersection.intersection_note = '북 접근로 없음(실제로 없음, 민호님 확인 2026-11-27)'. 도약 북 방향 카메라 BC002P1061은 민호님 2026-11-27 17:40 결정으로 카메라 뷰에서 제외했다(BC002P1061_camera_excluded 참고)."
+    source: "민호님 2026-11-27 17:15 원문(관리자봇 채팅, 팀장봇 전달): '도약삼거리-북은 없어 그리고 여월도 서북 없어'"
+    status: confirmed
+  - id: BC001N0056_northwest_approach_not_exist
+    type: approach_not_exist
+    node_id: BC001N0056
+    crsrd_nm: 여월휴먼시아1단지입구삼거리
+    missing_direction: "서북(북서)"
+    actual_approaches_in_db: "동(서향) ACSR000001, 남(북향) ACSR000002, 서(동향) ACSR000003"
+    finding: "이 교차로에는 서북(북서) 접근로가 실제로 없다. 접근로 3개가 정상이다. 카메라 이름에 '서북'이(가) 있어도 접근로를 만들지 않는다."
+    handling: "v_intersection.intersection_note = '서북 접근로 없음(실제로 없음, 민호님 확인 2026-11-27)'. 카메라 BC001P0198은 이름이 '교-서북'이지만 실제로는 서(동향) ACSR000003 카메라라서 연결을 유지한다(민호님 2026-11-27 17:42, BC001P0198_camera_name_note 참고)."
+    source: "민호님 2026-11-27 17:15 원문(관리자봇 채팅, 팀장봇 전달): '도약삼거리-북은 없어 그리고 여월도 서북 없어'"
+    status: confirmed
+  - id: BC002P1061_camera_excluded
+    type: camera_excluded
+    cmr_id: BC002P1061
+    cmr_nm: "308.도약3R-④-교-북(상행)"
+    node_id: BC002N0207
+    master_acsr_id: null
+    handling: "도약삼거리에는 북 접근로가 없어 이 카메라 정보는 필요 없다. 마스터 m_cmr_inf 행은 지우지 않고 카메라 뷰(v_camera, v_approach_camera, v_intersection.camera_count)에서 뺀다. 제외 목록 뷰: onto_v2.v_camera_exception. 다시 적재해도 같은 결과가 나온다."
+    source: "민호님 2026-11-27 17:40 원문(관리자봇 채팅, 팀장봇 전달): 도약삼거리 '교-북' 카메라 정보 필요없으니 지우고, 여월 '교-서북' 카메라는 서쪽 접근로(ACSR000003)에 연결되지 않게"
+    status: confirmed
+  - id: BC001P0198_camera_name_note
+    type: camera_name_vs_approach
+    cmr_id: BC001P0198
+    cmr_nm: "280-여월휴먼시아1단지입구3R-3구역-신호주-교-서북"
+    node_id: BC001N0056
+    acsr_id: ACSR000003
+    finding: "카메라 이름은 '교-서북'이지만 실제로는 서(동향) ACSR000003 접근로의 카메라다."
+    handling: "ACSR000003 연결을 그대로 유지한다. 연결을 끊거나 다른 접근로로 옮기지 않는다. 뷰·마스터 변경 없음. 여월 서(동향) 접근로의 카메라는 이 1대다."
+    source: "민호님 2026-11-27 17:42 원문(관리자봇 채팅, 팀장봇 전달): 아 그럼 서(동향)에는 저 카메라가 연결되어 있나보다 맞아!"
+    status: confirmed
 
 unconfirmed: []  # 2026-11-26 모두 결정됨
 
@@ -276,7 +318,8 @@ verification:
     v_approach_key: 1030
     v_movement: 4118
     v_lane: 2347
-    v_camera: 1344
+    v_camera: 1343
+    v_camera_exception: 1
     v_intersection: 286
     v_signal_controller: 286
     v_approach_signal: 1032
